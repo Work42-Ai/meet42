@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  meet42.entitlements — signed into the release binary (scripts/release.sh).
+
+  The release is built with the Hardened Runtime (notarization requires it). Under the Hardened Runtime
+  macOS refuses microphone and calendar access to a process that lacks these two entitlements, without
+  even showing the permission prompt. The usage-description strings the prompts show live in
+  Resources/meet42-Info.plist. Screen recording and speech recognition need no entitlement.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
+</dict>
+</plist>
