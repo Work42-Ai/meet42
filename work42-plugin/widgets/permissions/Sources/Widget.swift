@@ -10,7 +10,7 @@
 //   meet42 permissions open <name>                 open that permission's System Settings page
 //
 // All four rows are always shown, granted or not. When the CLI is not installed the tile says so and offers
-// Set up meet42, which runs `work42 plugin setup meet42` (a chat that follows the plugin's skills).
+// that the agent can set it up (the `meet42-setup` skill).
 //
 // Links only Work42PluginKit + Work42UI.
 
@@ -112,7 +112,6 @@ final class PermissionsModel {
     var version: String?
     var binaryDirectory: String?
     var busy: Set<String> = []
-    var setUpError: String?
 
     @ObservationIgnored var services: SessionServices?
 
@@ -156,19 +155,6 @@ final class PermissionsModel {
     func openSettings(_ name: String) async {
         guard let services else { return }
         _ = try? await services.shell.run(command: "meet42 permissions open \(name)")
-    }
-
-    func setUp() async {
-        guard let services else { return }
-        setUpError = nil
-        guard let result = try? await services.shell.run(command: "work42 plugin setup meet42") else {
-            setUpError = "Couldn\u{2019}t run work42."
-            return
-        }
-        if result.exitCode != 0 {
-            let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            setUpError = detail.isEmpty ? "work42 plugin setup meet42 failed." : detail
-        }
     }
 }
 
@@ -381,14 +367,12 @@ private struct NotInstalledView: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 300)
-            Button("Set up meet42") { Task { await model.setUp() } }
-                .glassSubtleCapsule(tint: DT.systemAccent)
-            Text("Opens a chat that installs it for you")
+            Text("Ask the agent in a session to set up meet42: it installs the tool and checks these permissions.")
                 .font(.system(size: DT.f9))
                 .foregroundStyle(.tertiary)
-            if let error = model.setUpError {
-                Text(error).font(.system(size: DT.f9)).foregroundStyle(DT.red).multilineTextAlignment(.center)
-            }
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 300)
         }
         .padding(DT.s20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

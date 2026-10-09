@@ -65,8 +65,8 @@ the four permissions above and lets you grant each. Install it from this reposit
 work42 plugin install https://github.com/Work42-Ai/meet42 --path work42-plugin
 ```
 
-then press **Set up** on it in Work42's Settings → Plugins (or run `work42 plugin setup meet42`): a chat session
-installs the tool above and walks you through the permissions, following the plugin's own skills.
+then ask the agent in any Work42 session to set up meet42. It follows the plugin's `meet42-setup` skill: it installs
+the tool above, then walks you through the permissions.
 
 ## Develop
 

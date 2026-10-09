@@ -19,25 +19,9 @@ carries a meeting URL. Empty until the snapshot exists.
 ## Prerequisites
 
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
-on this, check it:
-
-1. `command -v meet42` must print a path. If it prints nothing, install the latest signed release:
-
-   ```bash
-   mkdir -p ~/.work42/bin && cd "$(mktemp -d)"
-   curl -fsSLO https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip
-   curl -fsSLO https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip.sha256
-   shasum -a 256 -c meet42.zip.sha256
-   ditto -x -k meet42.zip ~/.work42/bin/
-   ```
-
-   `shasum` must print `meet42.zip: OK`. If it does not, stop and tell the user; do not run the download.
-2. `meet42 permissions --json` lists `calendar`, `microphone`, `speech` and `screen`. For each `not_determined`,
-   run `meet42 permissions request <name>` (macOS shows a prompt that names meet42; ask the user to allow it).
-   For one that is `denied`, and for `screen` (macOS has no prompt for it), ask the user to switch meet42 on in
-   System Settings: `meet42 permissions open <name>`. The **meet42 permissions** widget on an event's Brief tab
-   does the same one row at a time.
-3. `meet42 sync` once, so the calendar is loaded.
+on this, check `command -v meet42`: it must print a path. If it prints nothing, or a meet42 command fails
+because the tool is missing, follow the `meet42-setup` skill, which installs the signed release, grants its
+permissions and loads the calendar.
 
 ## Session file
 
