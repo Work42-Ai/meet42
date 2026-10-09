@@ -7,9 +7,15 @@
 // macOS TCC working for a CLI binary.
 //
 //   1. First call (no `--reexec`): we're a child of the spawning shell.
-//      `setsid()` to become a session leader, then `execve` ourselves with
-//      `--reexec` appended. The execve gives macOS a fresh process image to
-//      key TCC against our OWN code-sign identity (not the parent terminal's).
+//      `setsid()` to become a session leader, then re-exec ourselves in place
+//      with `--reexec` appended and macOS's "disclaim responsibility" spawn
+//      attribute set (`POSIX_SPAWN_SETEXEC`, same pid). A plain `execve` is NOT
+//      enough: macOS attributes privacy (TCC) requests to the *responsible
+//      process*, which a child inherits from its parent, so without the
+//      disclaim meet42 would read and ask for the permissions of whatever
+//      launched it (Terminal, the Work42 app) under that app's name. Disclaimed,
+//      it is its own principal: prompts say "meet42" and grants belong to its
+//      code-sign identity. Set MEET42_NO_DISCLAIM=1 to fall back to a plain execve.
 //   2. Second call (with `--reexec`): skip setsid (already done); request the
 //      TCC-gated resources (Calendar/Mic/Screen) and run the long-lived loop.
 //
@@ -21,6 +27,13 @@
 
 import Darwin
 import Foundation
+
+/// libSystem's `responsibility_spawnattrs_setdisclaim` (declared in <libproc/...> internals, exported by
+/// libSystem). Marks a spawn so the new process is its own responsible process for privacy (TCC) purposes.
+@_silgen_name("responsibility_spawnattrs_setdisclaim")
+private func meet42_responsibility_spawnattrs_setdisclaim(
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ disclaim: Int32
+) -> Int32
 
 public enum Meet42Daemon {
 
@@ -55,6 +68,19 @@ public enum Meet42Daemon {
             let cEnv = env.map { strdup("\($0.key)=\($0.value)") }
             defer { cEnv.forEach { free($0) } }
             var envPtrs: [UnsafeMutablePointer<CChar>?] = cEnv + [nil]
+
+            // 1. Re-exec as meet42's OWN permission principal (see `execDisclaimed`). Does not return on success.
+            if ProcessInfo.processInfo.environment["MEET42_NO_DISCLAIM"] != "1" {
+                argvPtrs.withUnsafeMutableBufferPointer { argvBuf in
+                    envPtrs.withUnsafeMutableBufferPointer { envBuf in
+                        execDisclaimed(exePath, argvBuf.baseAddress, envBuf.baseAddress)
+                    }
+                }
+                FileHandle.standardError.write(Data(
+                    "[meet42:daemon] disclaimed re-exec failed (\(String(cString: strerror(errno)))) — falling back to a plain execve\n".utf8
+                ))
+            }
+            // 2. Plain execve. macOS then still attributes permissions to whatever launched us.
             _ = argvPtrs.withUnsafeMutableBufferPointer { argvBuf in
                 envPtrs.withUnsafeMutableBufferPointer { envBuf in
                     execve(exePath, argvBuf.baseAddress, envBuf.baseAddress)
@@ -66,6 +92,31 @@ public enum Meet42Daemon {
                 "[meet42:daemon] execve failed (\(String(cString: strerror(errno)))) — continuing without re-exec\n".utf8
             ))
         }
+    }
+
+    /// Replaces this process with `path`, in place (same pid, same open files) like `execve`, but with macOS's
+    /// "disclaim responsibility" spawn attribute set.
+    ///
+    /// Why: macOS decides which app a permission request belongs to from the process's *responsible process*,
+    /// which a child inherits from its parent. A bare `execve` therefore leaves meet42 reporting and asking
+    /// for the permissions of whatever launched it (Terminal, or the Work42 app), under that app's name.
+    /// Disclaiming makes the new image its own responsible process, so the prompt says "meet42" and the grant
+    /// belongs to meet42's signature. `POSIX_SPAWN_SETEXEC` keeps the "this process becomes the daemon"
+    /// behaviour the callers rely on. The function only returns when the exec failed (errno is set).
+    private static func execDisclaimed(
+        _ path: String,
+        _ argv: UnsafePointer<UnsafeMutablePointer<CChar>?>?,
+        _ envp: UnsafePointer<UnsafeMutablePointer<CChar>?>?
+    ) {
+        var attr: posix_spawnattr_t? = nil
+        guard posix_spawnattr_init(&attr) == 0 else { return }
+        defer { posix_spawnattr_destroy(&attr) }
+        guard posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETEXEC)) == 0 else { return }
+        guard meet42_responsibility_spawnattrs_setdisclaim(&attr, 1) == 0 else { return }
+        var pid: pid_t = 0
+        // With POSIX_SPAWN_SETEXEC this does not return on success.
+        let rc = posix_spawn(&pid, path, nil, &attr, argv.map { UnsafeMutablePointer(mutating: $0) }, envp.map { UnsafeMutablePointer(mutating: $0) })
+        errno = rc
     }
 
     /// Absolute path to the running executable (for the execve self-call).

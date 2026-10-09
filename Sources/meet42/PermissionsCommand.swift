@@ -4,10 +4,11 @@
 //   meet42 permissions request <calendar|microphone|speech|screen> [--json]
 //   meet42 permissions open <calendar|microphone|speech|screen>
 //
-// Every verb that asks macOS about a permission first re-executes itself (`Meet42Daemon.daemonize`), the same
-// step `sync` and `record` take, so the status it reads and the prompt it shows belong to meet42's own
-// code-signing identity rather than to whatever launched it (a terminal, or the Work42 app). The one-time
-// `--reexec` flag marks the second pass.
+// Every verb that asks macOS about a permission first re-executes itself (`Meet42Daemon.daemonize`, the same
+// step `record start` takes) with "disclaim responsibility" set, so the status it reads and the prompt it
+// shows belong to meet42 itself rather than to whatever launched it (a terminal, or the Work42 app). A plain
+// re-exec is not enough: without the disclaim, `meet42 permissions` reports the PARENT's grants. The
+// one-time `--reexec` flag marks the second pass.
 
 import AVFoundation
 import CoreGraphics

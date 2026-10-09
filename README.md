@@ -76,8 +76,10 @@ swift test                          # unit tests
 scripts/build-meet42.sh             # release build, signed when DEVELOPER_ID is set
 ```
 
-An ad-hoc signed build has no stable identity, so macOS forgets permission grants on every rebuild and
-attributes prompts to whatever launched it. Test permissions with a build signed by `scripts/release.sh`.
+An ad-hoc signed build has no stable identity, so macOS forgets permission grants on every rebuild. Test
+permission *prompts* with a build signed by `scripts/release.sh`. (meet42 re-executes itself with macOS's
+"disclaim responsibility" attribute for the verbs that touch permissions, so it reports and asks for its own
+permissions, not those of the terminal or app that launched it; `MEET42_NO_DISCLAIM=1` turns that off.)
 
 ## Release
 
