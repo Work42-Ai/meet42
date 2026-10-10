@@ -222,6 +222,16 @@ final class CLICalendarStore {
         await MeetEventLoader.load(eventID: id, shell: services.shell)
     }
 
+    /// Creates the event's session in the foreground through the app's global `session.open` intent, so Work42
+    /// shows its "Setting up your Session" overlay and then opens the session selected. Throws when the intent fails.
+    func createEventSession(eventId: String, title: String) async throws {
+        try await services.intents.execute(id: "session.open", params: [
+            "typeId": .string("event"),
+            "name": .string(title),
+            "args": .object(["event_id": .string(eventId)]),
+        ])
+    }
+
     /// Cancels the automatic session entry for an event whose session was created on demand.
     func cancelScheduledSession(for eventId: String) async {
         _ = try? await services.shell.run(command: "work42 schedule cancel --key \(calShellQuote("mtg:\(eventId)"))")
@@ -1067,6 +1077,11 @@ private struct CalEventLoaderKey: EnvironmentKey {
     static let defaultValue: @MainActor (String) async -> MeetEventState = { _ in .unlinked }
 }
 
+/// Creates an event's session in the foreground through the app's `session.open` intent ("Create session now").
+private struct CalSessionCreateKey: EnvironmentKey {
+    static let defaultValue: @MainActor (_ eventId: String, _ title: String) async throws -> Void = { _, _ in }
+}
+
 /// Cancels the automatic session entry of an event (used after "Create session now").
 private struct CalSessionCancelKey: EnvironmentKey {
     static let defaultValue: @MainActor (String) async -> Void = { _ in }
@@ -1076,6 +1091,10 @@ extension EnvironmentValues {
     fileprivate var calEventLoader: @MainActor (String) async -> MeetEventState {
         get { self[CalEventLoaderKey.self] }
         set { self[CalEventLoaderKey.self] = newValue }
+    }
+    fileprivate var calSessionCreate: @MainActor (_ eventId: String, _ title: String) async throws -> Void {
+        get { self[CalSessionCreateKey.self] }
+        set { self[CalSessionCreateKey.self] = newValue }
     }
     fileprivate var calSessionCancel: @MainActor (String) async -> Void {
         get { self[CalSessionCancelKey.self] }
@@ -1093,6 +1112,7 @@ struct EventDetailPopover: View {
     let onDismiss: () -> Void
 
     @Environment(\.calEventLoader) private var loadEvent
+    @Environment(\.calSessionCreate) private var createEventSession
     @Environment(\.calSessionCancel) private var cancelScheduled
 
     @State private var event: MeetEvent?
@@ -1329,7 +1349,7 @@ struct EventDetailPopover: View {
                 Button {
                     Task { await createSession() }
                 } label: {
-                    Label(creating ? "Creating\u{2026}" : "Create session now", systemImage: "sparkles").lineLimit(1).fixedSize()
+                    Label("Create session now", systemImage: "sparkles").lineLimit(1).fixedSize()
                 }
                 .glassProminentCapsule(tint: DT.systemAccent)
                 .disabled(creating)
@@ -1351,19 +1371,21 @@ struct EventDetailPopover: View {
         return f.string(from: item.startsAt.addingTimeInterval(-15 * 60))
     }
 
-    /// Creates the event session now, through the same path the automatic one uses, cancels the scheduled
-    /// entry so the event doesn't get a second session, and reloads so the button becomes "Open session".
+    /// Creates the event session now in the foreground through the app's `session.open` intent (Work42 shows its
+    /// "Setting up your Session" overlay and opens the session), cancels the scheduled entry so the event doesn't
+    /// get a second session, and reloads so the button becomes "Open session in Work42". The overlay owns progress
+    /// and errors; the button stays disabled while the call runs so a double click can't create two sessions.
     private func createSession() async {
+        guard !creating else { return }
         creating = true
         createError = nil
         defer { creating = false }
-        guard let started = await CalendarDetectionAgent.mintEventSession(
-            name: item.title.isEmpty ? "Meeting" : item.title, eventId: item.id, storage: []
-        ) else {
-            createError = "Couldn\u{2019}t create the session."
+        do {
+            try await createEventSession(item.id, item.title.isEmpty ? "Meeting" : item.title)
+        } catch {
+            createError = "Couldn\u{2019}t create the session: \(error.localizedDescription)"
             return
         }
-        sessionId = started.sessionId
         await cancelScheduled(item.id)
         if case .loaded(let loaded) = await loadEvent(item.id), let linked = loaded.sessionId { sessionId = linked }
     }
@@ -2786,6 +2808,7 @@ private struct CalendarRootView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .environment(\.calEventLoader, { id in await store.loadMeetEvent(id) })
+                .environment(\.calSessionCreate, { id, title in try await store.createEventSession(eventId: id, title: title) })
                 .environment(\.calSessionCancel, { id in await store.cancelScheduledSession(for: id) })
                 // Invisible 0×0 anchor for the settings popover opened by the ⚙
                 // action-area intent (CalendarWidget.intents last entry). The popover
