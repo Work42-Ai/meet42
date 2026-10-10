@@ -36,5 +36,6 @@ so clicking it reveals the permissions.
 
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
 on this, check `command -v meet42`: it must print a path. If it prints nothing, or a meet42 command fails
-because the tool is missing, follow the `meet42-setup` skill, which installs the signed release, grants its
-permissions and loads the calendar.
+because the tool is missing, ask the user whether to install it (never install it without their yes); if they
+agree, follow the `meet42-setup` skill, which installs the signed release, grants its permissions and loads the
+calendar.

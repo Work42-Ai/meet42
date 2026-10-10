@@ -1,14 +1,14 @@
 {
   "slug": "meeting",
   "name": "Meeting",
-  "description": "The built-in meeting lifecycle: Prepare for Meeting, In Meeting, Summary, Done -- driven by the recording lifecycle.",
+  "description": "The meeting lifecycle: Prepare for Meeting, In Meeting, Summary, Done -- driven by the recording lifecycle of the meet42 command-line tool (github.com/Work42-Ai/meet42). meet42 reads the calendar, records and transcribes the meeting, and writes the files this workflow reads; every stage assumes it is installed. If `command -v meet42` prints nothing, ask the user, and with their yes the `meet42-setup` skill installs it.",
   "stages": [
     {
       "name": "Prepare for Meeting",
       "ordinal": 1,
       "is_initial": true,
       "is_terminal": false,
-      "entry_prompt": "You're in Prepare for Meeting. Fetch the context this meeting needs -- attendees, recent related threads, open tasks -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
+      "entry_prompt": "You're in Prepare for Meeting. This meeting runs on the meet42 command-line tool: first run `command -v meet42`. If it prints nothing (or a meet42 command fails because the tool is missing), ask the user whether they want you to install it (never install it without their yes), and if they agree follow the `meet42-setup` skill to install it and grant its permissions before anything else. Then fetch the context this meeting needs -- attendees, recent related threads, open tasks (`meet42 show <event_id>` gives the freshest event details, `meet42 people` the people it knows) -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
       "entry_gate": null,
       "icon": "tray.and.arrow.down",
       "color_light": "#0284C7",
@@ -21,7 +21,7 @@
       "ordinal": 2,
       "is_initial": false,
       "is_terminal": false,
-      "entry_prompt": "The recording started -- you're now In Meeting, running on Haiku for fast live notes. Keep concise running notes as the conversation happens. Stopping the recording writes meeting/ended_at, which moves this session to Summary.",
+      "entry_prompt": "The recording started -- you're now In Meeting, running on Haiku for fast live notes. meet42 is doing the recording (`meet42 record status` shows it) and writing the live transcript to conversation.jsonl in the recording directory stored at meeting/recording_dir. If a meet42 command fails because the tool is missing or too old, ask the user whether to install or update it, and follow the `meet42-setup` skill only if they agree. The user types their own notes into annotations.md in your session directory while the meeting runs; read it as you go and treat it as the priority signal. Keep concise running notes as the conversation happens. Stopping the recording writes meeting/ended_at, which moves this session to Summary.",
       "entry_gate": "{\"and\":[{\"namespace\":\"meeting\",\"key\":\"started_at\",\"op\":\"exists\"},{\"namespace\":\"meeting\",\"key\":\"ended_at\",\"op\":\"absent\"}]}",
       "icon": "waveform",
       "color_light": "#6D28D9",
@@ -34,7 +34,7 @@
       "ordinal": 3,
       "is_initial": false,
       "is_terminal": false,
-      "entry_prompt": "The recording stopped -- you're now in Summary. Write a clear recap to work42 storage as meeting/summary, then run `work42 transition \"Done\"`.",
+      "entry_prompt": "The recording stopped -- you're now in Summary, and this is the most important step: build the best possible summary of the meeting. Read everything it produced, in this order. (1) The user's own notes: annotations.md in your session directory (your working directory). They show what the user thought mattered, so anchor the summary on them. (2) The event details: meeting.json in your session directory (title, time, attendees, location) -- skip it if there is none. (3) The transcript meet42 wrote: conversation.jsonl in the recording directory, whose path is `work42 storage get meeting/recording_dir`. Each line is a JSON object with speaker (\"You\" is the user, \"Them\" the other side, or a name), text and audioStartSeconds; read all of it before writing. Use the transcript to fill in context, decisions and exact wording behind each note, and to catch important points the notes missed. Never invent anything that is in neither source; say so plainly when something is unclear or missing. Write the summary as markdown to summary.md in your session directory (the Summary tab renders that file) with these sections: a one-paragraph overview, Decisions, Action items (owner and due date when stated), Open questions, and Key points from the user's notes. Then run `work42 storage set meeting/summary '\"summary.md\"'` and `work42 transition \"Done\"`.",
       "entry_gate": "{\"namespace\": \"meeting\", \"key\": \"ended_at\", \"op\": \"exists\"}",
       "icon": "doc.text",
       "color_light": "#B45309",
@@ -333,6 +333,72 @@
       "stage": "Prepare for Meeting",
       "kind": "execute",
       "pattern": "meet42",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "command -v meet42",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "mkdir -p ~/.work42/bin",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "mktemp -d",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "curl -fsSLO https://github.com/Work42-Ai/meet42/",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "shasum -a 256 -c meet42.zip.sha256",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "ditto -x -k meet42.zip",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "codesign --verify --deep --strict meet42.app",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "codesign -dv --verbose=2 meet42.app",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "rm -rf ~/.work42/meet42.app",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "mv meet42.app ~/.work42/meet42.app",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "ln -sf ~/.work42/meet42.app/Contents/MacOS/meet42 ~/.work42/bin/meet42",
       "action": "allow"
     },
     {
