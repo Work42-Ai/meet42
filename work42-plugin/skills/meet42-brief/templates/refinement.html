@@ -1,0 +1,17 @@
+<!-- meet42 brief template, refinement. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. Sections: hero (the goal), readiness counts, Tickets (key, link, readiness tags: use class y for a check that holds and x for one that is missing, then a state pill), Questions to settle. Read readiness from the issues themselves (acceptance criteria present? estimate set? design linked?); never guess. -->
+<div class="m" style="--acc:#6d28d9">
+<header class="m-hero">
+  <div class="m-eyebrow">Refinement brief <span>· prepared 1:40 PM</span></div>
+  <div class="m-top"><h1 class="m-title">Sprint 42 refinement</h1><a class="m-join" href="https://meet.google.com/abc">Join</a></div>
+  <div class="m-meta"><span class="m-chip">Wed · 2:00 – 3:00 PM</span><span class="m-chip">6 people</span><span class="m-chip">5 tickets on the table</span></div>
+  <div class="m-lead"><small>The goal</small>Get <b>5 tickets ready for sprint 42</b>. Two are missing acceptance criteria and three have no estimate.</div>
+</header>
+<div class="m-stats"><div class="m-stat"><b>5</b><span>tickets</span></div><div class="m-stat ok"><b>2</b><span>look ready</span></div><div class="m-stat warn"><b>2</b><span>missing acceptance criteria</span></div><div class="m-stat warn"><b>3</b><span>not estimated</span></div></div>
+<section><div class="m-h"><h3>Tickets</h3><span>In the order worth discussing; readiness from Linear</span></div>
+  <div class="m-card">
+    <div class="m-row"><span class="m-key">WOR-131</span><div class="m-grow"><a href="https://example.com/WOR-131">Offline mode for sync v2</a><div class="m-ready"><span class="x">Criteria</span><span class="x">Estimate</span><span class="y">Design</span></div><div class="m-sub">Open: does offline include attachments?</div></div><span class="m-st st-warn">Needs work</span></div>
+    <div class="m-row"><span class="m-key">WOR-128</span><div class="m-grow"><a href="https://example.com/WOR-128">SAML metadata upload</a><div class="m-ready"><span class="y">Criteria</span><span class="x">Estimate</span><span class="y">Design</span></div><div class="m-sub">Depends on <a href="https://example.com/WOR-98">WOR-98</a></div></div><span class="m-st st-acc">Estimate</span></div>
+    <div class="m-row"><span class="m-key">WOR-125</span><div class="m-grow"><a href="https://example.com/WOR-125">Billing email templates</a><div class="m-ready"><span class="y">Criteria</span><span class="y">Estimate</span><span class="y">Design</span></div></div><span class="m-st st-ok">Ready · 3 pts</span></div>
+  </div></section>
+<section><div class="m-h"><h3>Questions to settle</h3></div><div class="m-card"><div class="m-row"><span class="m-ic q">?</span><div class="m-grow">Is offline attachments part of WOR-131 or a follow-up?<div class="m-sub">Ana asked in the issue 2 days ago, unanswered</div></div></div></div></section>
+</div>
