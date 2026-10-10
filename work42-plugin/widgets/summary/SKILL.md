@@ -2,17 +2,23 @@
 name: widget-summary
 description: |
   How the Summary widget (session tab kindId widget:summary) works on a meet42
-  meeting session. It is empty until the end-of-meeting pass writes summary.md,
-  then renders that file as themed markdown.
+  meeting session. It shows the "meeting-summary" artifact the agent writes in the
+  Summary stage, and contributes the "Summary ready · N action items" header label.
 ---
 
 # Summary widget
 
-Renders a meeting session's `summary.md` as themed markdown (via
-`Work42MarkdownDocument` — inline `[[artifact:id]]` embeds + the shared comment
-layer). The tile shows a waiting/empty state until the end-of-meeting agent
-pass writes the file, then renders the structured summary — decisions, action
-items, open questions, best-effort speaker attribution.
+Shows the session artifact `meeting-summary` full size, in the same style as the Meeting brief. The agent writes
+it in the Summary stage by following the `meet42-summary` skill (`work42 artifact set meeting-summary …`), then
+sets `meeting/summary` to `{"artifact":"meeting-summary","action_items":N}`. The widget reloads within about two
+seconds whenever the artifact's `index.html` changes. Until it exists the widget says the agent writes the summary
+when the meeting ends; if Work42's local artifact server isn't up it says so and offers **Retry**. Links inside the
+summary open through Work42's Open Link.
+
+The widget has no actions. To rewrite the summary, ask the agent in chat.
+
+**Header label:** "Summary ready · N action items" (N from `meeting/summary`), or "Summary ready" when only the
+artifact exists. It is shown on every tab and opens this widget (`meet42://widget/summary`).
 
 ## Prerequisites
 
