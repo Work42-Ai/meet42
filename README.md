@@ -65,7 +65,7 @@ meet42 help                       # every verb
 ## The Work42 plugin
 
 `work42-plugin/` is the Work42 plugin: an `event` session type, a meeting workflow, and widgets for event
-details, people, recording, annotations, summary, the calendar, and a **meet42 permissions** tile that shows
+details (with the guest list), recording, annotations, summary, the calendar, and a **meet42 permissions** tile that shows
 the four permissions above and lets you grant each. Install it from this repository:
 
 ```bash

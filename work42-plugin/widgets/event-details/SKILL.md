@@ -14,14 +14,17 @@ command is the agent's source for the event: there is no `meeting.json`.
 
 **Card:** the calendar's colour bar, a source chip ("Google · Work") and a status chip, the title, the absolute date
 and time (all-day aware), the meeting link with its provider (Google Meet, Zoom, Microsoft Teams, Webex, otherwise the
-host) and a copy button, the location (hidden when it is the meeting link), a guests summary with an RSVP bar, and the
+host) and a copy button, the location (hidden when it is the meeting link), the guest list (a summary with an RSVP bar, then the guests grouped Going, Maybe, No reply and
+Declined, each with an initials avatar, Organizer and You chips and an RSVP icon), and the
 description (the event notes as sanitised HTML, rendered by the SDK markdown viewer, collapsed behind **Show more**).
 
 **Not linked:** an event session created without a calendar event shows "Not linked to a calendar event". If `meet42`
 is missing or `show` fails, the widget shows the error and the command that failed.
 
 **Header label (every tab):** "Starts in N min" from 60 minutes before the start, "Live · N min left" during the
-meeting, "Ended h:mm" afterwards. It opens this widget (`meet42://widget/event-details`).
+meeting, "Ended h:mm" afterwards. A second label names the guests by first name, "Yan, Ethan, Enmo and 4 more" (up to
+4 guests are all named, beyond that the first 3 and a count), amber while anyone is tentative, pending or unknown.
+Both open this widget (`meet42://widget/event-details`).
 
 **Action:** **Join**, in the provider's brand colour, from 15 minutes before the start until the end, for an event
 with a meeting link. It opens the link with the operating system (the Zoom or Teams app when installed, otherwise the
