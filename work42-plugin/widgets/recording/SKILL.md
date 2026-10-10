@@ -20,12 +20,12 @@ optional Work42 owner PID); it has no mic-close or UI policy.
 
 ## Transcript avatars and speaker names
 
-Each transcript line shows a People-style avatar: **You** with your initials (from the linked event's current-user
+Each transcript line shows a guest-list-style avatar: **You** with your initials (from the linked event's current-user
 attendee, else "Y"), **Speaker N** with an "SN" avatar whose colour is stable for the meeting, and **Them** with a grey
 avatar. When the agent matched a speaker to an attendee in the Summary stage it writes `speakers.json` into the
 recording folder, `{"Speaker 1": {"name": "Marcus Lee", "email": "marcus@acme.com"}}` (`email` and `person_id` optional;
 the flat `{"Speaker 1": "Marcus Lee"}` form still works). That speaker's lines then show the person's name and the same
-avatar People shows (the colour comes from the email). The agent writes only confident matches; the rest stay Speaker N.
+avatar the guest list shows (the colour comes from the email). The agent writes only confident matches; the rest stay Speaker N.
 
 ## Header labels (every tab)
 

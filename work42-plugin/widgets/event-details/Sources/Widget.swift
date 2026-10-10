@@ -5,8 +5,9 @@
 // An ad-hoc event session (no calendar event) shows a clean "Not linked" state.
 //
 //   • Card: calendar colour bar, source and status chips, title, absolute time, the meeting link with its provider
-//     and a copy button, the location, a guests summary with an RSVP bar, and the description (the notes as
-//     sanitised HTML, rendered by the SDK markdown viewer).
+//     and a copy button, the location, the guest list (a summary with an RSVP bar, then the guests grouped by
+//     reply: Going, Maybe, No reply, Declined) and the description (the notes as sanitised HTML, rendered by the
+//     SDK markdown viewer).
 //   • Header label (every tab): "Starts in N min" → "Live · N min left" → "Ended h:mm", opening this widget.
 //   • Action: **Join** (the provider's brand colour) from 15 minutes before the start to the end; it opens the
 //     meeting link with the operating system.
@@ -296,34 +297,75 @@ private struct EventCard: View {
     }
 
     private var guests: some View {
-        card {
-            VStack(alignment: .leading, spacing: DT.s8) {
-                HStack {
-                    HStack(spacing: -7) {
-                        ForEach(Array(event.attendees.prefix(4).enumerated()), id: \.offset) { _, a in
-                            MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
-                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24)
-                        }
-                        if event.attendees.count > 4 {
-                            MeetAvatarView(initials: "+\(event.attendees.count - 4)", key: "more", size: 24, gradient: MeetAvatar.palette[5])
-                        }
+        VStack(alignment: .leading, spacing: DT.s8) {
+            HStack(spacing: DT.s12) {
+                HStack(spacing: -8) {
+                    ForEach(Array(event.attendees.prefix(4).enumerated()), id: \.offset) { _, a in
+                        MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                       key: MeetAvatar.key(name: a.name, email: a.email), size: 30)
                     }
+                }
+                VStack(alignment: .leading, spacing: 1) {
                     Text("\(event.attendees.count) \(event.attendees.count == 1 ? "person" : "people")")
-                        .font(.system(size: DT.f12, weight: .semibold)).padding(.leading, DT.s8)
-                    Spacer(minLength: 0)
-                    if let organizer = event.organizer, !organizer.isEmpty {
-                        Text("Organized by \(organizer)").font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
-                    }
+                        .font(.system(size: 15, weight: .bold))
+                    Text(guestBreakdown).font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                rsvpBar
-                HStack(spacing: DT.s12) {
-                    legend("going", event.count(.going), DT.green)
-                    legend("maybe", event.count(.maybe), DT.amber)
-                    legend("no reply", event.count(.noReply), DT.textTertiary)
-                    if event.count(.declined) > 0 { legend("declined", event.count(.declined), DT.red) }
-                }
+                Spacer(minLength: 0)
+            }
+            rsvpBar
+            ForEach(MeetRSVP.allCases, id: \.rawValue) { group in
+                let members = event.attendees.filter { MeetRSVP(status: $0.status) == group }
+                if !members.isEmpty { guestGroup(group, members) }
             }
         }
+    }
+
+    /// "4 going · 1 maybe · 1 no reply · organized by Ana Silva" (declined only when someone declined).
+    private var guestBreakdown: String {
+        var parts = ["\(event.count(.going)) going", "\(event.count(.maybe)) maybe", "\(event.count(.noReply)) no reply"]
+        if event.count(.declined) > 0 { parts.append("\(event.count(.declined)) declined") }
+        if let organizer = event.organizer, !organizer.isEmpty { parts.append("organized by \(organizer)") }
+        return parts.joined(separator: " \u{00B7} ")
+    }
+
+    private func guestGroup(_ group: MeetRSVP, _ members: [MeetEvent.Attendee]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("\(group.title.uppercased()) \u{00B7} \(members.count)")
+                .font(.system(size: DT.f10, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.tertiary)
+                .padding(.bottom, DT.s4)
+            VStack(spacing: 0) {
+                ForEach(Array(members.enumerated()), id: \.offset) { index, person in
+                    if index > 0 { Divider().opacity(0.35).padding(.leading, 42) }
+                    guestRow(person, group)
+                }
+            }
+            .padding(.horizontal, DT.s8)
+            .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
+            .overlay(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).strokeBorder(DT.chipStroke, lineWidth: 0.5))
+        }
+    }
+
+    private func guestRow(_ person: MeetEvent.Attendee, _ group: MeetRSVP) -> some View {
+        HStack(spacing: DT.s12) {
+            MeetAvatarView(initials: MeetAvatar.initials(name: person.name, email: person.email),
+                           key: MeetAvatar.key(name: person.name, email: person.email), size: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(person.displayName).font(.system(size: DT.f12, weight: .semibold)).lineLimit(1)
+                    if person.isOrganizer { chip("Organizer", tint: DT.systemAccent) }
+                    if person.isCurrentUser { chip("You", tint: nil) }
+                }
+                if let email = person.email, person.name?.isEmpty == false {
+                    Text(email).font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            Image(systemName: group.symbol).foregroundStyle(group.color)
+        }
+        .padding(.vertical, 8)
     }
 
     private var rsvpBar: some View {
@@ -333,13 +375,6 @@ private struct EventCard: View {
             ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
                 if part.0 > 0 { RoundedRectangle(cornerRadius: 3).fill(part.1).frame(height: 6).layoutPriority(Double(part.0)) }
             }
-        }
-    }
-
-    private func legend(_ label: String, _ count: Int, _ color: Color) -> some View {
-        HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text("\(count) \(label)").font(.system(size: DT.f11)).foregroundStyle(.secondary)
         }
     }
 

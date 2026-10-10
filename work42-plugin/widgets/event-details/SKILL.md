@@ -14,7 +14,8 @@ command is the agent's source for the event: there is no `meeting.json`.
 
 **Card:** the calendar's colour bar, a source chip ("Google · Work") and a status chip, the title, the absolute date
 and time (all-day aware), the meeting link with its provider (Google Meet, Zoom, Microsoft Teams, Webex, otherwise the
-host) and a copy button, the location (hidden when it is the meeting link), a guests summary with an RSVP bar, and the
+host) and a copy button, the location (hidden when it is the meeting link), the guest list (a summary with an RSVP bar, then the guests grouped Going, Maybe, No reply and
+Declined, each with an initials avatar, Organizer and You chips and an RSVP icon), and the
 description (the event notes as sanitised HTML, rendered by the SDK markdown viewer, collapsed behind **Show more**).
 
 **Not linked:** an event session created without a calendar event shows "Not linked to a calendar event". If `meet42`

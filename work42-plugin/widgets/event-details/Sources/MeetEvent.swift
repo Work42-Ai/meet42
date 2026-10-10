@@ -1,9 +1,9 @@
-// MeetEvent.swift — shared by the Event details, People and Recording widgets (copied into each widget's
+// MeetEvent.swift — shared by the Event details, Recording and Calendar widgets (copied into each widget's
 // Sources by scripts/sync-shared.sh, because every widget compiles on its own).
 //
 // The session stores only the calendar event id (`meeting/event_id`); everything else is read live through
 // `meet42 show <id> --json`. This file holds the tolerant decoder for that output, the loader, the avatar style
-// (so a person looks the same in People, the transcript and the header label), the RSVP grouping, the meeting
+// (so a person looks the same in the guest list, the transcript and the header label), the RSVP grouping, the meeting
 // provider detection and the relative-time label.
 
 import Foundation
@@ -206,13 +206,13 @@ enum MeetRSVP: Int, CaseIterable {
 
 extension MeetEvent {
     func count(_ group: MeetRSVP) -> Int { attendees.filter { MeetRSVP(status: $0.status) == group }.count }
-    /// True when anyone is tentative, pending or unknown (the People label turns amber).
+    /// True when anyone is tentative, pending or unknown (the guests label turns amber).
     var hasOpenReplies: Bool { count(.maybe) + count(.noReply) > 0 }
 }
 
 // MARK: - Avatars
 
-/// One avatar style everywhere (People, transcript, header label). A person's colour comes from their email
+/// One avatar style everywhere (guest list, transcript, header label). A person's colour comes from their email
 /// (else their name), so they look the same in every widget.
 enum MeetAvatar {
 
