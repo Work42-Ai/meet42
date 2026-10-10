@@ -143,6 +143,8 @@ enum RecordingLine: Identifiable {
 struct ResolvedSpeaker {
     let name: String
     let personId: String?
+    /// The attendee's email when the agent matched the speaker to one (the avatar colour then matches People).
+    let email: String?
 }
 
 private func conversationPath(sessionDir: String) -> String {
@@ -164,9 +166,9 @@ private func parseConversation(sessionDir: String) -> [RecordingLine] {
         .compactMap { RecordingLine(jsonString: $0) }
 }
 
-/// Load the optional `speakers.json` sidecar. Accepts both the flat
-/// `{ "<key>": "<Name>" }` and the rich
-/// `{ "<key>": { "person_id": "<id>", "name": "<Name>" } }` shapes.
+/// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
+/// `{ "<key>": "<Name>" }` shape and the rich
+/// `{ "<key>": { "name": "<Name>", "email": "<email>", "person_id": "<id>" } }` shape (`email` and `person_id` optional).
 private func loadSpeakers(sessionDir: String) -> [String: ResolvedSpeaker] {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: speakersPath(sessionDir: sessionDir))),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -175,9 +177,9 @@ private func loadSpeakers(sessionDir: String) -> [String: ResolvedSpeaker] {
     var out: [String: ResolvedSpeaker] = [:]
     for (key, value) in obj {
         if let name = value as? String {
-            out[key] = ResolvedSpeaker(name: name, personId: nil)
+            out[key] = ResolvedSpeaker(name: name, personId: nil, email: nil)
         } else if let dict = value as? [String: Any], let name = dict["name"] as? String {
-            out[key] = ResolvedSpeaker(name: name, personId: dict["person_id"] as? String)
+            out[key] = ResolvedSpeaker(name: name, personId: dict["person_id"] as? String, email: dict["email"] as? String)
         }
     }
     return out
@@ -836,21 +838,96 @@ private final class RecordingMeetingRegistry {
     }
 }
 
+private let recordingLink = URL(string: "meet42://widget/recording")!
+private let permissionsLink = URL(string: "meet42://widget/permissions")!
+
 @Observable
 @MainActor
 private final class RecordingMeetingAgent: WidgetBackgroundAgent {
     var headerLabels: [WidgetHeaderLabel] = []
     private var model: RecordingMeetingModel?
+    @ObservationIgnored private var labelTask: Task<Void, Never>?
 
     func start(services: WidgetBackgroundServices) {
         let model = RecordingMeetingRegistry.shared.model(for: services.sessionId)
         self.model = model
         model.start(services: services)
+        labelTask?.cancel()
+        labelTask = Task { [weak self] in await self?.runLabels(services) }
     }
 
     func stop() {
+        labelTask?.cancel()
+        labelTask = nil
         model?.stop()
         model = nil
+    }
+
+    /// Labels on every tab: "● REC mm:ss" while this session records, "Recording didn't start" while the last
+    /// Record press failed, and "meet42 needs setup" while the tool is missing or a permission isn't granted.
+    private func runLabels(_ services: WidgetBackgroundServices) async {
+        var recording = false
+        var startedAt: Date?
+        var startFailed = false
+        var needsSetup = false
+        var lastState = Date.distantPast
+        var lastSetup = Date.distantPast
+        while !Task.isCancelled {
+            let now = Date()
+            if now.timeIntervalSince(lastState) >= 5 {
+                lastState = now
+                (recording, startedAt) = await Self.recordingState(services)
+                if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
+                    startFailed = true
+                } else {
+                    startFailed = false
+                }
+            }
+            if now.timeIntervalSince(lastSetup) >= 60 {
+                lastSetup = now
+                needsSetup = await Self.setupNeeded(services.shell)
+            }
+            var labels: [WidgetHeaderLabel] = []
+            if recording {
+                let seconds = max(0, Int(now.timeIntervalSince(startedAt ?? now)))
+                let text = String(format: "\u{25CF} REC %02d:%02d", seconds / 60, seconds % 60)
+                labels.append(WidgetHeaderLabel(text: text, tint: .failure, url: recordingLink))
+            } else if startFailed {
+                labels.append(WidgetHeaderLabel(text: "Recording didn\u{2019}t start", systemIcon: "exclamationmark.triangle", tint: .warning, url: recordingLink))
+            }
+            if needsSetup {
+                labels.append(WidgetHeaderLabel(text: "meet42 needs setup", systemIcon: "wrench.and.screwdriver", tint: .warning, url: permissionsLink))
+            }
+            if labels != headerLabels { headerLabels = labels }
+            try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    /// Whether THIS session is the active recording (`meet42 record status` dir == `meeting/recording_dir`) and
+    /// when it started (`meeting/started_at`).
+    private static func recordingState(_ services: WidgetBackgroundServices) async -> (Bool, Date?) {
+        guard let result = try? await services.shell.run(command: "meet42 record status --json"), result.exitCode == 0,
+              let data = result.stdout.data(using: .utf8),
+              let status = try? JSONDecoder().decode(RecordingRecordStatusPayload.self, from: data),
+              status.recording, let dir = status.dir,
+              case .string(let mine)? = try? await services.storage.get(namespace: "meeting", key: "recording_dir"),
+              mine == dir else { return (false, nil) }
+        var startedAt: Date?
+        if case .string(let text)? = try? await services.storage.get(namespace: "meeting", key: "started_at") {
+            let plain = ISO8601DateFormatter()
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            startedAt = plain.date(from: text) ?? fractional.date(from: text)
+        }
+        return (true, startedAt)
+    }
+
+    /// True when `meet42` can't be run or any permission is not granted.
+    private static func setupNeeded(_ shell: any WidgetShellService) async -> Bool {
+        guard let result = try? await shell.run(command: "meet42 permissions --json"), result.exitCode == 0,
+              let data = result.stdout.data(using: .utf8),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return true }
+        return rows.contains { ($0["status"] as? String) != "granted" }
     }
 }
 
@@ -901,7 +978,10 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
     let title = "Meet42 Recording"
     let icon = "waveform"
 
-    var linkIntents: [WidgetLinkIntentSpec] { [] }
+    var linkIntents: [WidgetLinkIntentSpec] {
+        // The host reveals the widget before calling `perform`, which is all the label link has to do.
+        [WidgetLinkIntentSpec(matchers: [.regex(#"^meet42://widget/recording$"#)], perform: { _ in })]
+    }
     var minSize: WidgetMinSize { WidgetMinSize(width: 280, height: 220) }
 
     // MARK: - Recording state (drives action-area intent isEnabled / labels)
@@ -1177,6 +1257,49 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
     }
 }
 
+// MARK: - Transcript identity
+
+/// Who a transcript line belongs to, as the avatar and name to draw.
+struct TranscriptIdentity {
+    let name: String
+    let initials: String
+    let key: String
+    let gradient: (Color, Color)?
+    let muted: Bool
+
+    static func resolve(
+        line: RecordingLine.SpeakerLine, speakers: [String: ResolvedSpeaker], me: MeetEvent.Attendee?
+    ) -> TranscriptIdentity {
+        switch line.speaker {
+        case .you:
+            if let me {
+                return TranscriptIdentity(
+                    name: "You", initials: MeetAvatar.initials(name: me.name, email: me.email),
+                    key: MeetAvatar.key(name: me.name, email: me.email), gradient: nil, muted: false
+                )
+            }
+            return TranscriptIdentity(name: "You", initials: "Y", key: "you", gradient: MeetAvatar.palette[4], muted: false)
+        case .them:
+            let label = line.speakerLabel ?? "Them"
+            if let matched = speakers[label] ?? speakers["Them"] ?? speakers["them"] {
+                return TranscriptIdentity(
+                    name: matched.name, initials: MeetAvatar.initials(name: matched.name, email: matched.email),
+                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), gradient: nil, muted: false
+                )
+            }
+            if label.hasPrefix("Speaker "), let n = Int(label.dropFirst("Speaker ".count)) {
+                return TranscriptIdentity(
+                    name: label, initials: "S\(n)", key: label,
+                    gradient: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
+                )
+            }
+            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", gradient: MeetAvatar.palette[5], muted: true)
+        case .unknown:
+            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", gradient: MeetAvatar.palette[5], muted: true)
+        }
+    }
+}
+
 // MARK: - RecordingTileView (the tile — conversation.jsonl → ChatBubbles)
 
 /// Faithful port of the app's `RecordingWidgetView`: renders
@@ -1184,8 +1307,16 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
 /// resolver popover is DROPPED (it required Flow42Core's `PeopleStore`); the
 /// avatar is inert here. System-event cards render without the image thumbnail
 /// (loading a file image needs AppKit/ImageIO, outside the allowed imports).
+/// The linked event's current user, for the "You" avatar in the transcript.
+@Observable
+@MainActor
+final class TileEventHolder {
+    var currentUser: MeetEvent.Attendee?
+}
+
 private struct RecordingTileView: View {
     let services: SessionServices
+    @State private var eventState = TileEventHolder()
 
     @State private var conversationWatcher = WidgetFileWatcher()
     @State private var speakersWatcher = WidgetFileWatcher()
@@ -1236,6 +1367,14 @@ private struct RecordingTileView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let startError { startErrorBanner(startError) }
+        }
+        .task {
+            while !Task.isCancelled {
+                if case .loaded(let event) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                    eventState.currentUser = event.attendees.first(where: { $0.isCurrentUser })
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
         }
         .task {
             // Keep the failure banner in step with the stored start error.
@@ -1323,70 +1462,34 @@ private struct RecordingTileView: View {
         }
     }
 
+    /// One transcript line: the shared People-style avatar, the speaker's name and time, and the text.
+    /// You = the current user (from the linked event, else "Y"); `Speaker N` = a numbered avatar with a stable
+    /// colour; `Them` = grey; a speaker the agent matched in speakers.json = that person's name and People avatar.
     @ViewBuilder
     private func speakerBubble(
         for line: RecordingLine.SpeakerLine,
         speakers: [String: ResolvedSpeaker]
     ) -> some View {
-        switch line.speaker {
-        case .you:
-            ChatBubble(
-                side: .trailing,
-                style: .accent,
-                header: ChatBubbleHeader(timestamp: parseISO8601(line.ts))
-            ) {
+        let who = TranscriptIdentity.resolve(line: line, speakers: speakers, me: eventState.currentUser)
+        HStack(alignment: .top, spacing: DT.s8) {
+            MeetAvatarView(initials: who.initials, key: who.key, size: 26, gradient: who.gradient)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(who.name)
+                        .font(.system(size: DT.f11, weight: .semibold))
+                        .foregroundStyle(who.muted ? DT.textSecondary : DT.textPrimary)
+                    if let date = parseISO8601(line.ts) {
+                        Text(date, style: .time).font(.system(size: DT.f10)).foregroundStyle(DT.textTertiary)
+                    }
+                }
                 Text(line.text)
                     .font(.system(size: DT.f12))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .environment(\.chatBubbleForegroundColor, DT.accentForeground)
             }
-
-        case .them:
-            // Speaker key precedence: this line's own diarized label first (so
-            // distinct remote voices get distinct identities), then the legacy
-            // "Them"/"them" keys. A speaker stays fully NEUTRAL (grey) until
-            // MATCHED to a person in speakers.json; once matched the person's
-            // stable palette color paints avatar + name + bubble tint.
-            let speakerKey = line.speakerLabel ?? "Them"
-            let resolved = speakers[speakerKey] ?? speakers["Them"] ?? speakers["them"]
-            let displayName = resolved?.name ?? speakerKey
-            let matchedColor = resolved.map { personColor(for: $0.personId ?? $0.name) }
-            let style: ChatBubbleStyle = matchedColor.map { .speaker($0) } ?? .neutral
-            let avatarColor: Color = matchedColor ?? Color.gray
-            ChatBubble(
-                side: .leading,
-                style: style,
-                header: ChatBubbleHeader(
-                    name: displayName,
-                    avatar: .initials(initialsString(for: displayName), color: avatarColor),
-                    timestamp: parseISO8601(line.ts)
-                )
-            ) {
-                Text(line.text)
-                    .font(.system(size: DT.f12))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-            }
-
-        case .unknown:
-            ChatBubble(
-                side: .leading,
-                style: .neutral,
-                header: ChatBubbleHeader(timestamp: parseISO8601(line.ts))
-            ) {
-                Text(line.text)
-                    .font(.system(size: DT.f12))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-            }
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, 2)
     }
 
     /// A system-event entry as a CENTERED, visually distinct card. The image

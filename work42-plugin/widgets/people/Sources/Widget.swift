@@ -1,394 +1,274 @@
-// Widget.swift — meet42's People widget (meet42-plugin-conversion, M2/s13).
+// Widget.swift — meet42's People widget.
 //
-// Ported from Work42App/Meetings/PeopleWidgetView, rendered identically (AC12):
-// an "ATTENDEES (n)" section with a per-person row (stable palette avatar +
-// name + organizer/you chips + a single info line "email · N shared meetings ·
-// last seen …"). The only change is the DATA SOURCE: instead of opening
-// Flow42Core's PeopleStore directly (plugin widgets can't link Flow42Core), it
-// shells the standalone `meet42 people --session-dir <dir> --json` verb and
-// decodes a local [PersonRow] mirror. Organizer/you badges + the email
-// fallback come from `<dir>/meeting.json`'s attendee list (a local Codable
-// mirror), paired with the profiles by order — exactly as the original paired
-// PeopleStore profiles with meeting.json attendees.
+// The guests of the session's calendar event, read live from `meet42 show <event_id> --json` (the same source as
+// Event details), grouped by reply: Going, Maybe, No reply (pending and unknown) and Declined. Each person gets
+// the shared avatar (colour from their email), their name or, when the calendar has none, their email, and
+// Organizer / You chips. An ad-hoc event session shows "No guest list".
 //
-// Links only Work42PluginKit + Work42UI. `personColor` / `initialsString` / the
-// DT tokens are all public in Work42UI.
+//   • Header label (every tab): one grouped pill — up to 3 avatar segments and "N people · a going", amber while
+//     anyone is tentative, pending or unknown — which opens this widget (`meet42://widget/people`).
+//
+// The shared decoder, avatars and helpers live in work42-plugin/shared/MeetEvent.swift.
 
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
 import Work42UI
 import Work42PluginKit
 
-// MARK: - PersonRow (local mirror of `meet42 people --json`)
+private let peopleLink = URL(string: "meet42://widget/people")!
 
-/// One row of `meet42 people --json` output — a local mirror of meet42's
-/// `PersonProfile` (snake_case keys, per its Codable conformance).
-struct PersonRow: Codable, Identifiable {
-    let personId: String
-    let name: String?
-    let email: String?
-    let sharedMeetingCount: Int
-    let lastSeen: String?
+// MARK: - Widget
 
-    var id: String { personId }
-
-    private enum CodingKeys: String, CodingKey {
-        case personId = "person_id"
-        case name
-        case email
-        case sharedMeetingCount = "shared_meeting_count"
-        case lastSeen = "last_seen"
-    }
-}
-
-// MARK: - MeetingSnapshot (local mirror of <dir>/meeting.json, attendees only)
-
-/// Minimal local mirror of meet42's `MeetingMeta.File` — only the attendee
-/// fields the People widget needs for the organizer/you chips + email fallback.
-/// Keys match `CalendarEvent.Item`/`.Attendee`'s default JSON encoding verbatim.
-private struct PeopleMeetingSnapshot: Codable {
-    struct Event: Codable { let attendees: [Attendee] }
-    struct Attendee: Codable {
-        let name: String?
-        let email: String?
-        let isOrganizer: Bool
-        let isCurrentUser: Bool
-    }
-    let event: Event
-
-    static func load(dir: String) -> PeopleMeetingSnapshot? {
-        let path = (dir as NSString).appendingPathComponent("meeting.json")
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(PeopleMeetingSnapshot.self, from: data)
-    }
-
-    static func path(dir: String) -> String {
-        (dir as NSString).appendingPathComponent("meeting.json")
-    }
-}
-
-// MARK: - WidgetFileWatcher (local FileWatcher reimplementation)
-
-/// Minimal self-contained replacement for `Work42App.FileWatcher` — polls the
-/// file's (mtime, size) signature every second and bumps `version` on change,
-/// so the view reloads profiles when meet42 rewrites `meeting.json`.
 @Observable
 @MainActor
-private final class WidgetFileWatcher {
+final class PeopleWidget: Work42Widget, Work42WidgetBackground {
 
-    private(set) var version = 0
+    let id = "people"
+    let title = "People"
+    let icon = "person.2.fill"
+    var linkIntents: [WidgetLinkIntentSpec] {
+        [WidgetLinkIntentSpec(matchers: [.regex(#"^meet42://widget/people$"#)], perform: { _ in })]
+    }
+    var minSize: WidgetMinSize { WidgetMinSize(width: 280, height: 220) }
 
-    @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var path: String?
-    @ObservationIgnored private var lastSignature = ""
+    func activate(services: SessionServices) {}
+    func deactivate() {}
 
-    func watch(_ path: String) {
-        guard self.path != path else { return }
-        self.path = path
-        lastSignature = Self.signature(of: path)
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.poll() }
+    func makeView(services: SessionServices) -> AnyView {
+        AnyView(PeopleView(services: services))
+    }
+
+    func makeBackgroundAgent() -> any WidgetBackgroundAgent { PeopleLabelAgent() }
+}
+
+// MARK: - Label agent (one per session)
+
+@Observable
+@MainActor
+final class PeopleLabelAgent: WidgetBackgroundAgent {
+
+    private(set) var headerLabels: [WidgetHeaderLabel] = []
+
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var avatarPNG: [String: Data] = [:]
+
+    func start(services: WidgetBackgroundServices) {
+        task?.cancel()
+        task = Task { [weak self] in
+            while !Task.isCancelled {
+                if case .loaded(let event) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                    self?.update(event)
+                } else if self?.headerLabels.isEmpty == false {
+                    self?.headerLabels = []
+                }
+                try? await Task.sleep(for: .seconds(60))
             }
         }
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        task?.cancel()
+        task = nil
     }
 
-    private func poll() {
-        guard let path else { return }
-        let sig = Self.signature(of: path)
-        guard sig != lastSignature else { return }
-        lastSignature = sig
-        version &+= 1
+    private func update(_ event: MeetEvent) {
+        guard !event.attendees.isEmpty else {
+            if !headerLabels.isEmpty { headerLabels = [] }
+            return
+        }
+        let group = "meet42.people"
+        var labels: [WidgetHeaderLabel] = event.attendees.prefix(3).map { person in
+            WidgetHeaderLabel(
+                text: "", iconImageData: png(for: person), tint: .neutral, url: peopleLink, groupId: group
+            )
+        }
+        let count = event.attendees.count
+        let text = "\(count) \(count == 1 ? "person" : "people") \u{00B7} \(event.count(.going)) going"
+        labels.append(WidgetHeaderLabel(
+            text: text, tint: event.hasOpenReplies ? .warning : .neutral, url: peopleLink, groupId: group
+        ))
+        if labels != headerLabels { headerLabels = labels }
     }
 
-    private static func signature(of path: String) -> String {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let size = (attrs?[.size] as? Int) ?? 0
-        return "\(mtime)-\(size)"
-    }
-}
-
-// MARK: - PeopleWidget
-
-@Observable
-@MainActor
-final class PeopleWidget: Work42Widget, Work42WidgetPill {
-
-    let id = "people"
-    let title = "Meet42 People"
-    let icon = "person.2"
-    var linkIntents: [WidgetLinkIntentSpec] { [] }
-    var minSize: WidgetMinSize { WidgetMinSize(width: 260, height: 200) }
-
-    func makeView(services: SessionServices) -> AnyView {
-        AnyView(PeopleWidgetBody(services: services))
-    }
-
-    // MARK: Work42WidgetPill
-
-    func makePillView(services: SessionServices) -> AnyView? {
-        AnyView(PeoplePillView(services: services))
-    }
-
-    var pillMetadata: WidgetPillMetadata {
-        WidgetPillMetadata(
-            preferredSize: WidgetMinSize(width: 320, height: 240),
-            title: title,
-            icon: icon
-        )
+    /// A PNG of the person's avatar for a label segment (rendered once per person).
+    private func png(for person: MeetEvent.Attendee) -> Data? {
+        let key = MeetAvatar.key(name: person.name, email: person.email)
+        if let cached = avatarPNG[key] { return cached }
+        let renderer = ImageRenderer(content: MeetAvatarView(
+            initials: MeetAvatar.initials(name: person.name, email: person.email), key: key, size: 18
+        ).padding(1))
+        renderer.scale = 2
+        guard let cgImage = renderer.cgImage else { return nil }
+        let data = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
+        if let data { avatarPNG[key] = data }
+        return data
     }
 }
 
-// MARK: - Model
+// MARK: - View
 
-/// A fetched profile paired with its source meeting.json attendee (for the
-/// organizer/you chips + email fallback), mirroring the original
-/// `PeopleWidgetView.AttendeeProfile`.
-private struct AttendeeProfile: Identifiable {
-    let attendee: PeopleMeetingSnapshot.Attendee?
-    let profile: PersonRow
-    var id: String { profile.personId }
-}
-
-/// Loads `[AttendeeProfile]` by shelling `meet42 people --json` and pairing the
-/// result with `meeting.json`'s attendees by order.
-@MainActor
-private func loadProfiles(services: SessionServices) async -> [AttendeeProfile] {
-    guard let dir = services.worktreePath else { return [] }
-    let attendees = PeopleMeetingSnapshot.load(dir: dir)?.event.attendees ?? []
-    let command = "meet42 people --session-dir '"
-        + dir.replacingOccurrences(of: "'", with: "'\\''") + "' --json"
-    guard let result = try? await services.shell.run(command: command),
-          result.exitCode == 0,
-          let data = result.stdout.data(using: .utf8),
-          let rows = try? JSONDecoder().decode([PersonRow].self, from: data)
-    else { return [] }
-    return rows.enumerated().map { idx, row in
-        AttendeeProfile(attendee: idx < attendees.count ? attendees[idx] : nil, profile: row)
-    }
-}
-
-// MARK: - Body view
-
-private struct PeopleWidgetBody: View {
+private struct PeopleView: View {
     let services: SessionServices
 
-    @State private var profiles: [AttendeeProfile] = []
-    @State private var watcher = WidgetFileWatcher()
+    @State private var state: MeetEventState?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: DT.s16) {
-                if profiles.isEmpty {
-                    emptyState
+        Group {
+            switch state {
+            case nil:
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .unlinked?:
+                message(symbol: "person.2", title: "No guest list",
+                        text: "Guests and their replies appear here for meetings created from your calendar.")
+            case .failed(let command, let detail)?:
+                errorState(command: command, message: detail)
+            case .loaded(let event)?:
+                if event.attendees.isEmpty {
+                    message(symbol: "person.2", title: "No guest list", text: "This event has no guests.")
                 } else {
-                    attendeesBlock
+                    PeopleList(event: event)
                 }
             }
-            .padding(.horizontal, DT.s16)
-            .padding(.vertical, DT.s16)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task { profiles = await loadProfiles(services: services) }
-        .onAppear { if let dir = services.worktreePath { watcher.watch(PeopleMeetingSnapshot.path(dir: dir)) } }
-        .onDisappear { watcher.stop() }
-        .onChange(of: watcher.version) { _, _ in
-            Task { profiles = await loadProfiles(services: services) }
-        }
-    }
-
-    private var attendeesBlock: some View {
-        let nonEmpty = profiles.filter { $0.profile.sharedMeetingCount > 0 }
-        let allZero = nonEmpty.isEmpty
-        return VStack(alignment: .leading, spacing: DT.s16) {
-            Text("ATTENDEES (\(profiles.count))")
-                .font(.system(size: DT.f9, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(DT.textTertiary)
-
-            if allZero {
-                noDataYetMessage
-            } else {
-                VStack(alignment: .leading, spacing: DT.s12) {
-                    ForEach(profiles) { entry in
-                        personRow(entry)
-                        Divider().opacity(0.3)
-                    }
-                }
+        .task {
+            while !Task.isCancelled {
+                state = await MeetEventLoader.load(shell: services.shell, storage: services.storage)
+                try? await Task.sleep(for: .seconds(60))
             }
         }
     }
 
-    private func personRow(_ entry: AttendeeProfile) -> some View {
-        let displayName = entry.profile.name ?? entry.profile.email
-            ?? entry.attendee?.name ?? entry.attendee?.email ?? "(unknown)"
-        let color = personColor(for: entry.profile.personId)
-        return HStack(spacing: DT.s8) {
-            personAvatar(displayName, color: color, size: 34)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: DT.s8) {
-                    Text(displayName)
-                        .font(.system(size: DT.f13, weight: .semibold))
-                        .foregroundStyle(color)
-                        .lineLimit(1)
-                    if entry.attendee?.isOrganizer == true {
-                        chip("organizer", tint: DT.systemAccent)
-                    }
-                    if entry.attendee?.isCurrentUser == true {
-                        chip("you", tint: .green)
-                    }
-                    Spacer(minLength: 0)
-                }
-                Text(metaLine(for: entry))
-                    .font(.system(size: DT.f10))
-                    .foregroundStyle(DT.textTertiary)
-                    .lineLimit(1)
-            }
-        }
-    }
-
-    private func personAvatar(_ name: String, color: Color, size: CGFloat) -> some View {
-        Text(initialsString(for: name))
-            .font(.system(size: size * 0.35, weight: .bold))
-            .foregroundStyle(Color.white)
-            .frame(width: size, height: size)
-            .background(color, in: Circle())
-    }
-
-    private func metaLine(for entry: AttendeeProfile) -> String {
-        var parts: [String] = []
-        if let email = entry.profile.email ?? entry.attendee?.email { parts.append(email) }
-        let n = entry.profile.sharedMeetingCount
-        parts.append(n == 0 ? "no meetings yet" : "\(n) shared meeting\(n == 1 ? "" : "s")")
-        if let lastSeen = entry.profile.lastSeen {
-            parts.append("last seen \(Self.relativeIso(lastSeen))")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private func chip(_ label: String, tint: Color) -> some View {
-        Text(label)
-            .font(.system(size: DT.f9, weight: .semibold))
-            .tracking(0.4)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(Capsule().fill(tint.opacity(0.16)))
-            .foregroundStyle(tint)
-    }
-
-    private var emptyState: some View {
+    private func message(symbol: String, title: String, text: String) -> some View {
         VStack(spacing: DT.s12) {
-            Image(systemName: "person.2.slash")
-                .font(.system(size: 28, weight: .light))
-                .foregroundStyle(DT.textTertiary)
-            Text("No attendee data")
-                .font(.system(size: DT.f13, weight: .medium))
-            Text("No `meeting.json` found or no attendees listed. People data appears once a meeting session has been minted with attendees.")
+            Image(systemName: symbol)
+                .font(.system(size: 22))
+                .foregroundStyle(.secondary)
+                .frame(width: 46, height: 46)
+                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(DT.chipFill))
+            Text(title).font(.system(size: DT.f13, weight: .semibold))
+            Text(text)
                 .font(.system(size: DT.f11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 300)
         }
         .padding(DT.s24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var noDataYetMessage: some View {
+    private func errorState(command: String, message: String) -> some View {
         VStack(alignment: .leading, spacing: DT.s8) {
-            ForEach(profiles) { entry in
-                HStack(spacing: DT.s8) {
-                    personAvatar(
-                        entry.profile.name ?? entry.profile.email ?? "(unknown)",
-                        color: personColor(for: entry.profile.personId),
-                        size: 26
-                    )
-                    Text(entry.profile.name ?? entry.profile.email ?? "(unknown)")
-                        .font(.system(size: DT.f12))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    if entry.attendee?.isOrganizer == true { chip("organizer", tint: DT.systemAccent) }
-                    if entry.attendee?.isCurrentUser == true { chip("you", tint: .green) }
-                    Spacer(minLength: 0)
-                }
-            }
-            Divider().opacity(0.3)
-            HStack(spacing: DT.s8) {
-                Image(systemName: "info.circle")
-                    .font(.system(size: DT.f10))
-                    .foregroundStyle(DT.textTertiary)
-                Text("No accumulated data yet — people data builds up across meetings.")
-                    .font(.system(size: DT.f10))
-                    .foregroundStyle(DT.textTertiary)
-            }
-            .padding(.top, 2)
+            Label("Couldn\u{2019}t load the guests", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: DT.f13, weight: .semibold))
+                .foregroundStyle(DT.amber)
+            Text(message).font(.system(size: DT.f11)).foregroundStyle(.secondary).textSelection(.enabled)
+            Text(command).font(.system(size: DT.f10, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
         }
-    }
-
-    static func relativeIso(_ s: String) -> String {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: s) {
-            let r = RelativeDateTimeFormatter()
-            r.unitsStyle = .abbreviated
-            return r.localizedString(for: d, relativeTo: Date())
-        }
-        let f2 = ISO8601DateFormatter()
-        f2.formatOptions = [.withInternetDateTime]
-        if let d = f2.date(from: s) {
-            let r = RelativeDateTimeFormatter()
-            r.unitsStyle = .abbreviated
-            return r.localizedString(for: d, relativeTo: Date())
-        }
-        return s
+        .padding(DT.s16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
-// MARK: - Pill view (compact)
-
-private struct PeoplePillView: View {
-    let services: SessionServices
-    @State private var profiles: [AttendeeProfile] = []
+private struct PeopleList: View {
+    let event: MeetEvent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DT.s8) {
-            if profiles.isEmpty {
-                HStack(spacing: DT.s8) {
-                    Image(systemName: "person.2.slash").foregroundStyle(DT.textTertiary)
-                    Text("No attendees").font(.system(size: DT.f11)).foregroundStyle(.secondary)
-                }
-            } else {
-                Text("ATTENDEES (\(profiles.count))")
-                    .font(.system(size: DT.f9, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(DT.textTertiary)
-                ForEach(profiles.prefix(6)) { entry in
-                    let displayName = entry.profile.name ?? entry.profile.email ?? "(unknown)"
-                    HStack(spacing: DT.s8) {
-                        Text(initialsString(for: displayName))
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 24, height: 24)
-                            .background(personColor(for: entry.profile.personId), in: Circle())
-                        Text(displayName)
-                            .font(.system(size: DT.f12))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: DT.s12) {
+                summary
+                ForEach(MeetRSVP.allCases, id: \.rawValue) { group in
+                    let members = event.attendees.filter { MeetRSVP(status: $0.status) == group }
+                    if !members.isEmpty { section(group, members) }
                 }
             }
+            .padding(.horizontal, DT.s16)
+            .padding(.bottom, DT.s16)
+            .padding(.top, DT.s4)
         }
-        .padding(DT.s12)
-        .task { profiles = await loadProfiles(services: services) }
     }
+
+    private var summary: some View {
+        HStack(spacing: DT.s12) {
+            HStack(spacing: -8) {
+                ForEach(Array(event.attendees.prefix(4).enumerated()), id: \.offset) { _, a in
+                    MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                   key: MeetAvatar.key(name: a.name, email: a.email), size: 30)
+                }
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(event.attendees.count) \(event.attendees.count == 1 ? "person" : "people")")
+                    .font(.system(size: 15, weight: .bold))
+                Text(breakdown).font(.system(size: DT.f11)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var breakdown: String {
+        var parts = ["\(event.count(.going)) going", "\(event.count(.maybe)) maybe", "\(event.count(.noReply)) no reply"]
+        if event.count(.declined) > 0 { parts.append("\(event.count(.declined)) declined") }
+        return parts.joined(separator: " \u{00B7} ")
+    }
+
+    private func section(_ group: MeetRSVP, _ members: [MeetEvent.Attendee]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("\(group.title.uppercased()) \u{00B7} \(members.count)")
+                .font(.system(size: DT.f10, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.tertiary)
+                .padding(.bottom, DT.s4)
+            VStack(spacing: 0) {
+                ForEach(Array(members.enumerated()), id: \.offset) { index, person in
+                    if index > 0 { Divider().opacity(0.35).padding(.leading, 42) }
+                    row(person, group)
+                }
+            }
+            .padding(.horizontal, DT.s8)
+            .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
+            .overlay(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).strokeBorder(DT.chipStroke, lineWidth: 0.5))
+        }
+    }
+
+    private func row(_ person: MeetEvent.Attendee, _ group: MeetRSVP) -> some View {
+        HStack(spacing: DT.s12) {
+            MeetAvatarView(initials: MeetAvatar.initials(name: person.name, email: person.email),
+                           key: MeetAvatar.key(name: person.name, email: person.email), size: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(person.displayName).font(.system(size: DT.f12, weight: .semibold)).lineLimit(1)
+                    if person.isOrganizer { chip("Organizer", tint: DT.systemAccent) }
+                    if person.isCurrentUser { chip("You", tint: nil) }
+                }
+                if let email = person.email, person.name?.isEmpty == false {
+                    Text(email).font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            Image(systemName: group.symbol).foregroundStyle(group.color)
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func chip(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(tint ?? .secondary)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(Capsule().fill((tint ?? Color.primary).opacity(tint == nil ? 0.07 : 0.14)))
+    }
+}
+
+@_cdecl("work42_widget_sdk_version")
+public func work42_widget_sdk_version() -> Int32 { WidgetSDK.abiVersion }
+
+@_cdecl("work42_widget_main")
+public func work42_widget_main() -> UnsafeMutableRawPointer {
+    nonisolated(unsafe) var result: UnsafeMutableRawPointer!
+    MainActor.assumeIsolated {
+        result = WidgetEntryPoint.register(PeopleWidget())
+    }
+    return result
 }

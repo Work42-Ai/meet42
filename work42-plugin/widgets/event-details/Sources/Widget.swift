@@ -1,507 +1,389 @@
-// Widget.swift — meet42's Event Details widget (meet42-plugin-conversion, s12).
+// Widget.swift — meet42's Event details widget.
 //
-// A faithful, identical-UI port of the app's EventDetailsWidgetView
-// (`Sources/Work42App/Meetings/EventDetailsWidgetView.swift`) into a plugin
-// widget that links ONLY Work42PluginKit + Work42UI. The original took a
-// `Flow42Core.CalendarEvent.Item` + snapshot timestamp handed down by the
-// session panel; a plugin widget can't import Flow42Core, so this reads the
-// session's `<dir>/meeting.json` snapshot directly and decodes it through a
-// LOCAL Codable mirror (`MeetingSnapshot`) whose property names + Codable
-// keys match meet42's on-disk JSON exactly (see MeetingMeta.File /
-// CalendarEvent.Item in meet42-cli). A small Timer-based file watcher
-// reloads the view when meet42 rewrites the snapshot on sync.
+// Reads the calendar event live through `meet42 show <event_id> --json` (the id is the session's
+// `meeting/event_id`), so it works without any file in the session and reflects edits made in the calendar.
+// An ad-hoc event session (no calendar event) shows a clean "Not linked" state.
 //
-// SESSION FILE (read-only):
-//   <dir>/meeting.json — the snapshot meet42 writes around a meeting session.
+//   • Card: calendar colour bar, source and status chips, title, absolute time, the meeting link with its provider
+//     and a copy button, the location, a guests summary with an RSVP bar, and the description (the notes as
+//     sanitised HTML, rendered by the SDK markdown viewer).
+//   • Header label (every tab): "Starts in N min" → "Live · N min left" → "Ended h:mm", opening this widget.
+//   • Action: **Join** (the provider's brand colour) from 15 minutes before the start to the end; it opens the
+//     meeting link with the operating system.
+//
+// The shared decoder, avatars and helpers live in work42-plugin/shared/MeetEvent.swift.
 
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
 import Work42UI
 import Work42PluginKit
 
-// MARK: - MeetingSnapshot (local Flow42Core mirror)
+private let eventLink = URL(string: "meet42://widget/event-details")!
 
-/// Local mirror of `Meet42Kit.MeetingMeta.File` + `CalendarEvent.Item`. Only
-/// the fields this widget renders are declared; JSONDecoder ignores the rest.
-/// Property names + raw-value enum cases match the on-disk JSON exactly
-/// (`JSONEncoder` default key strategy + `.iso8601` dates, per MeetingMeta.write).
-struct MeetingSnapshot: Codable {
+// MARK: - Widget
 
-    struct Event: Codable {
-        let title: String
-        let startsAt: Date
-        let endsAt: Date
-        let location: String?
-        let organizer: String?
-        let notes: String?
-        let url: String?
-        let meetingURL: String?
-        let calendarTitle: String?
-        let source: Source
-        let status: Status
-        let attendees: [Attendee]
+@Observable
+@MainActor
+final class EventDetailsWidget: Work42Widget, Work42WidgetBackground {
+
+    let id = "event-details"
+    let title = "Event details"
+    let icon = "calendar"
+    var linkIntents: [WidgetLinkIntentSpec] {
+        [WidgetLinkIntentSpec(matchers: [.regex(#"^meet42://widget/event-details$"#)], perform: { _ in })]
+    }
+    var minSize: WidgetMinSize { WidgetMinSize(width: 300, height: 260) }
+
+    /// The linked event, kept current by a poll that starts on activation (drives the Join action).
+    private(set) var event: MeetEvent?
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+
+    func activate(services: SessionServices) {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if case .loaded(let loaded) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                    self?.event = loaded
+                } else {
+                    self?.event = nil
+                }
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
     }
 
-    struct Attendee: Codable {
-        let name: String?
-        let email: String?
-        let status: AttendeeStatus
-        let isOrganizer: Bool
-        let isCurrentUser: Bool
+    func deactivate() {
+        pollTask?.cancel()
+        pollTask = nil
+        event = nil
     }
 
-    enum Source: String, Codable {
-        case exchange, icloud, google, caldav, local, other
+    func makeView(services: SessionServices) -> AnyView {
+        AnyView(EventDetailsView(services: services))
     }
 
-    enum Status: String, Codable {
-        case confirmed, tentative, canceled, none
+    func makeBackgroundAgent() -> any WidgetBackgroundAgent { EventDetailsLabelAgent() }
+
+    // MARK: Join
+
+    /// Join shows from 15 minutes before the start until the end, for an event that has a meeting link.
+    private func joinURL(now: Date = Date()) -> URL? {
+        guard let event, let link = event.meetingURL, let url = URL(string: link) else { return nil }
+        return now >= event.startsAt.addingTimeInterval(-15 * 60) && now <= event.endsAt ? url : nil
     }
 
-    enum AttendeeStatus: String, Codable {
-        case unknown, pending, accepted, declined, tentative
-    }
-
-    let event: Event
-    let snapshotAt: String
-
-    /// Load + decode `<dir>/meeting.json`, or nil when absent/unreadable.
-    static func load(dir: String) -> MeetingSnapshot? {
-        let path = (dir as NSString).appendingPathComponent("meeting.json")
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(MeetingSnapshot.self, from: data)
-    }
-
-    static func path(dir: String) -> String {
-        (dir as NSString).appendingPathComponent("meeting.json")
+    var intents: [WidgetIntentSpec] {
+        [
+            WidgetIntentSpec(
+                name: "join",
+                title: "Join",
+                icon: "video.fill",
+                brandColorHex: MeetProvider.detect(event?.meetingURL)?.brandHex,
+                keywords: ["meeting", "call", "zoom", "meet", "teams"],
+                placement: [.actionArea, .palette],
+                actionAreaStyle: .labeled,
+                isEnabled: { [weak self] in self?.joinURL() != nil },
+                livePeriodicTick: 30,
+                perform: { [weak self] in
+                    if let url = self?.joinURL() { NSWorkspace.shared.open(url) }
+                }
+            ),
+        ]
     }
 }
 
-// MARK: - WidgetFileWatcher (local FileWatcher reimplementation)
+// MARK: - Label agent (one per session)
 
-/// Minimal self-contained replacement for `Work42App.FileWatcher`. Polls the
-/// file's (mtime, size) signature every second and bumps `version` on change,
-/// so a SwiftUI view that reads `version` re-renders when the file is rewritten
-/// out-of-band (e.g. meet42's calendar sync).
 @Observable
 @MainActor
-final class WidgetFileWatcher {
+final class EventDetailsLabelAgent: WidgetBackgroundAgent {
 
-    private(set) var version = 0
+    private(set) var headerLabels: [WidgetHeaderLabel] = []
 
-    @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var path: String?
-    @ObservationIgnored private var lastSignature = ""
+    @ObservationIgnored private var task: Task<Void, Never>?
 
-    func watch(_ path: String) {
-        guard self.path != path else { return }
-        self.path = path
-        lastSignature = Self.signature(of: path)
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.poll() }
+    func start(services: WidgetBackgroundServices) {
+        task?.cancel()
+        task = Task { [weak self] in
+            var event: MeetEvent?
+            var lastLoad = Date.distantPast
+            while !Task.isCancelled {
+                if Date().timeIntervalSince(lastLoad) >= 60 {
+                    if case .loaded(let loaded) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                        event = loaded
+                    } else {
+                        event = nil
+                    }
+                    lastLoad = Date()
+                }
+                self?.update(event)
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        task?.cancel()
+        task = nil
     }
 
-    private func poll() {
-        guard let path else { return }
-        let sig = Self.signature(of: path)
-        guard sig != lastSignature else { return }
-        lastSignature = sig
-        version &+= 1
-    }
-
-    private static func signature(of path: String) -> String {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let size = (attrs?[.size] as? Int) ?? 0
-        return "\(mtime)-\(size)"
+    private func update(_ event: MeetEvent?) {
+        var labels: [WidgetHeaderLabel] = []
+        if let event, let item = MeetTimeLabel.label(for: event) {
+            labels = [WidgetHeaderLabel(text: item.text, systemIcon: "clock", tint: item.tint, url: eventLink)]
+        }
+        if labels != headerLabels { headerLabels = labels }
     }
 }
 
-// MARK: - EventDetailsWidget
+// MARK: - View
 
-@Observable
-@MainActor
-final class EventDetailsWidget: Work42Widget, Work42WidgetPill {
-
-    let id = "eventDetails"
-    let title = "Meet42 Event"
-    let icon = "calendar"
-    var linkIntents: [WidgetLinkIntentSpec] { [] }
-    var minSize: WidgetMinSize { WidgetMinSize(width: 260, height: 200) }
-
-    func makeView(services: SessionServices) -> AnyView {
-        AnyView(EventDetailsWidgetView(services: services))
-    }
-
-    // MARK: Work42WidgetPill
-
-    func makePillView(services: SessionServices) -> AnyView? {
-        AnyView(EventDetailsPillView(services: services))
-    }
-
-    var pillMetadata: WidgetPillMetadata {
-        WidgetPillMetadata(
-            preferredSize: WidgetMinSize(width: 320, height: 160),
-            title: title,
-            icon: icon
-        )
-    }
-}
-
-// MARK: - EventDetailsWidgetView
-
-/// Faithful port of the app's EventDetailsWidgetView. Reads the session's
-/// `meeting.json` snapshot and renders the full event detail; shows an empty
-/// state until the snapshot exists.
-private struct EventDetailsWidgetView: View {
+private struct EventDetailsView: View {
     let services: SessionServices
 
-    @State private var watcher = WidgetFileWatcher()
+    @State private var state: MeetEventState?
+    @State private var descriptionExpanded = false
 
     var body: some View {
-        let _ = watcher.version
-        let dir = services.worktreePath
-        let snapshot = dir.flatMap { MeetingSnapshot.load(dir: $0) }
-
         Group {
-            if let snapshot {
-                EventDetailBody(event: snapshot.event, snapshotAt: snapshot.snapshotAt)
-            } else {
+            switch state {
+            case nil:
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .unlinked?:
                 emptyState
+            case .failed(let command, let message)?:
+                errorState(command: command, message: message)
+            case .loaded(let event)?:
+                EventCard(event: event, descriptionExpanded: $descriptionExpanded)
             }
         }
-        .onAppear {
-            if let dir { watcher.watch(MeetingSnapshot.path(dir: dir)) }
+        .task {
+            while !Task.isCancelled {
+                state = await MeetEventLoader.load(shell: services.shell, storage: services.storage)
+                try? await Task.sleep(for: .seconds(60))
+            }
         }
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: DT.s8) {
-            Text("No event snapshot")
-                .font(.system(size: DT.f13, weight: .semibold))
-                .foregroundStyle(.primary)
-            Text("This widget renders the meeting captured in the session's meeting.json. It appears once the event has been synced here.")
+        VStack(spacing: DT.s12) {
+            Image(systemName: "calendar")
+                .font(.system(size: 22))
+                .foregroundStyle(.secondary)
+                .frame(width: 46, height: 46)
+                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(DT.chipFill))
+            Text("Not linked to a calendar event").font(.system(size: DT.f13, weight: .semibold))
+            Text("Time, meeting link, location and guests appear here for meetings created from your calendar.")
                 .font(.system(size: DT.f11))
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 300)
+        }
+        .padding(DT.s24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func errorState(command: String, message: String) -> some View {
+        VStack(alignment: .leading, spacing: DT.s8) {
+            Label("Couldn\u{2019}t load the event", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: DT.f13, weight: .semibold))
+                .foregroundStyle(DT.amber)
+            Text(message).font(.system(size: DT.f11)).foregroundStyle(.secondary).textSelection(.enabled)
+            Text(command).font(.system(size: DT.f10, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
         }
         .padding(DT.s16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
-// MARK: - EventDetailBody (the ported detail layout)
-
-private struct EventDetailBody: View {
-
-    let event: MeetingSnapshot.Event
-    /// ISO 8601 of when the snapshot was last refreshed. Surfaced
-    /// as a small "synced 12s ago" footer so the user can tell
-    /// whether the data is stale.
-    let snapshotAt: String
+private struct EventCard: View {
+    let event: MeetEvent
+    @Binding var descriptionExpanded: Bool
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: DT.s16) {
-                titleBlock
-                Divider().opacity(0.4)
-                metaBlock
-                if !event.attendees.isEmpty {
-                    Divider().opacity(0.4)
-                    attendeesBlock
-                }
-                if let notes = event.notes,
-                   !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Divider().opacity(0.4)
-                    notesBlock(notes)
-                }
-                snapshotFooter
-                    .padding(.top, DT.s8)
+            VStack(alignment: .leading, spacing: DT.s12) {
+                header
+                if let link = event.meetingURL, let provider = MeetProvider.detect(link) { meetingLink(link, provider) }
+                if let location = event.location?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !location.isEmpty, location != event.meetingURL { locationRow(location) }
+                if !event.attendees.isEmpty { guests }
+                if let html = event.notesHTML, !html.isEmpty { description(html) }
             }
             .padding(.horizontal, DT.s16)
-            .padding(.vertical, DT.s16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, DT.s16)
         }
     }
 
-    // MARK: - Title + Status
+    // MARK: Header
 
-    private var titleBlock: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(event.title.isEmpty ? "(Untitled)" : event.title)
-                .font(.system(size: DT.f17, weight: .bold))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-            HStack(spacing: DT.s8) {
-                Label(EventDetailBody.formatRange(event.startsAt, event.endsAt),
-                      systemImage: "clock")
-                    .font(.system(size: DT.f11))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: DT.s8) {
-                rsvpBadge
-                statusBadge
-                Spacer(minLength: 0)
-            }
-            if let url = event.meetingURL ?? event.url, !url.isEmpty,
-               let parsed = URL(string: url) {
-                Link(destination: parsed) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "link")
-                        Text("Join meeting")
-                    }
-                    .font(.system(size: DT.f12, weight: .medium))
-                    .padding(.horizontal, DT.s12)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: DT.rButton)
-                            .fill(DT.systemAccent.opacity(0.16))
-                    )
-                    .foregroundStyle(DT.systemAccent)
+    private var accent: Color { color(hex: event.calendarColor) ?? DT.systemAccent }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: DT.s12) {
+            RoundedRectangle(cornerRadius: 2).fill(accent).frame(width: 4)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    chip("\(MeetProvider.sourceName(event.source))\(event.calendarTitle.map { " \u{00B7} \($0)" } ?? "")", tint: nil)
+                    if let status = statusChip { chip(status.text, tint: status.tint) }
                 }
-                .buttonStyle(.plain)
+                Text(event.title.isEmpty ? "(Untitled)" : event.title)
+                    .font(.system(size: 21, weight: .bold))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: DT.s8) {
+                    Image(systemName: "clock").font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                    Text(timeText).font(.system(size: DT.f12))
+                }
             }
         }
+        .padding(.top, DT.s4)
     }
 
-    /// "Going" / "Maybe" / "Declined" — what the user RSVP'd, if
-    /// the snapshot includes them as an attendee. Hidden when the
-    /// user isn't on the attendee list (organizer-only meetings,
-    /// holiday calendars).
-    @ViewBuilder
-    private var rsvpBadge: some View {
-        if let me = event.attendees.first(where: { $0.isCurrentUser }) {
-            let (label, color): (String, Color) = {
-                switch me.status {
-                case .accepted:  return ("Going", .green)
-                case .declined:  return ("Declined", .red)
-                case .tentative: return ("Maybe", .orange)
-                case .pending:   return ("No reply", .gray)
-                case .unknown:   return ("—", .gray.opacity(0.5))
-                }
-            }()
-            chip(label, tint: color)
-        }
-    }
-
-    /// Confirmed / tentative / canceled — the meeting's overall
-    /// status. Pulls dual duty alongside the user's RSVP.
-    private var statusBadge: some View {
-        let label: String
-        let color: Color
+    private var statusChip: (text: String, tint: Color)? {
         switch event.status {
-        case .confirmed: label = "Confirmed"; color = .green
-        case .tentative: label = "Tentative"; color = .orange
-        case .canceled:  label = "Canceled";  color = .red
-        case .none:      label = "—";         color = .gray
-        }
-        return chip(label, tint: color)
-    }
-
-    private func chip(_ label: String, tint: Color) -> some View {
-        Text(label)
-            .font(.system(size: DT.f9, weight: .semibold))
-            .tracking(0.4)
-            .padding(.horizontal, DT.s8)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(tint.opacity(0.18)))
-            .foregroundStyle(.secondary)
-    }
-
-    // MARK: - Meta block
-
-    private var metaBlock: some View {
-        VStack(alignment: .leading, spacing: DT.s8) {
-            if let loc = event.location, !loc.isEmpty {
-                metaRow(symbol: "mappin.and.ellipse", text: loc)
-            }
-            if let org = event.organizer, !org.isEmpty {
-                metaRow(symbol: "person.crop.circle", text: "Organized by \(org)")
-            }
-            if let cal = event.calendarTitle {
-                metaRow(
-                    symbol: "calendar",
-                    text: "\(cal) · \(event.source.rawValue)"
-                )
-            }
+        case "confirmed": return ("Confirmed", DT.green)
+        case "tentative": return ("Tentative", DT.amber)
+        case "canceled": return ("Canceled", DT.red)
+        default: return nil
         }
     }
 
-    private func metaRow(symbol: String, text: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
-            Image(systemName: symbol)
-                .font(.system(size: DT.f10))
-                .foregroundStyle(DT.textTertiary)
-                .frame(width: 16, alignment: .leading)
-            Text(text)
-                .font(.system(size: DT.f12))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
+    private var timeText: String {
+        let day = DateFormatter()
+        day.dateFormat = "EEE, MMM d"
+        if event.allDay { return "\(day.string(from: event.startsAt)) \u{00B7} All day" }
+        let time = DateFormatter()
+        time.dateFormat = "h:mm"
+        let end = DateFormatter()
+        end.dateFormat = "h:mm a"
+        return "\(day.string(from: event.startsAt)) \u{00B7} \(time.string(from: event.startsAt)) \u{2013} \(end.string(from: event.endsAt))"
+    }
+
+    // MARK: Cards
+
+    private func meetingLink(_ link: String, _ provider: MeetProvider) -> some View {
+        card {
+            HStack(spacing: DT.s12) {
+                Image(systemName: "video.fill")
+                    .foregroundStyle(provider.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(provider.name).font(.system(size: DT.f12, weight: .semibold))
+                    Text(link.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""))
+                        .font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link, forType: .string)
+                } label: { Image(systemName: "doc.on.doc") }
+                    .glassIconButton()
+                    .help("Copy link")
+            }
         }
     }
 
-    // MARK: - Attendees
+    private func locationRow(_ location: String) -> some View {
+        card {
+            HStack(spacing: DT.s12) {
+                Image(systemName: "mappin.and.ellipse").foregroundStyle(.secondary)
+                Text(location).font(.system(size: DT.f12)).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+    }
 
-    private var attendeesBlock: some View {
-        VStack(alignment: .leading, spacing: DT.s8) {
-            Text("ATTENDEES (\(event.attendees.count))")
-                .font(.system(size: DT.f9, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(DT.textTertiary)
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(event.attendees.enumerated()), id: \.offset) { _, a in
-                    HStack(spacing: DT.s8) {
-                        statusDot(a.status)
-                        Text(a.name ?? a.email ?? "(unknown)")
-                            .font(.system(size: DT.f11, weight: a.isCurrentUser ? .semibold : .regular))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if a.isOrganizer {
-                            Text("organizer")
-                                .font(.system(size: DT.f9, weight: .semibold))
-                                .tracking(0.4)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(DT.systemAccent.opacity(0.16)))
-                                .foregroundStyle(DT.systemAccent)
+    private var guests: some View {
+        card {
+            VStack(alignment: .leading, spacing: DT.s8) {
+                HStack {
+                    HStack(spacing: -7) {
+                        ForEach(Array(event.attendees.prefix(4).enumerated()), id: \.offset) { _, a in
+                            MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24)
                         }
-                        if a.isCurrentUser {
-                            Text("you")
-                                .font(.system(size: DT.f9, weight: .semibold))
-                                .tracking(0.4)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Color.green.opacity(0.16)))
-                                .foregroundStyle(.secondary)
+                        if event.attendees.count > 4 {
+                            MeetAvatarView(initials: "+\(event.attendees.count - 4)", key: "more", size: 24, gradient: MeetAvatar.palette[5])
                         }
-                        Spacer(minLength: 0)
                     }
+                    Text("\(event.attendees.count) \(event.attendees.count == 1 ? "person" : "people")")
+                        .font(.system(size: DT.f12, weight: .semibold)).padding(.leading, DT.s8)
+                    Spacer(minLength: 0)
+                    if let organizer = event.organizer, !organizer.isEmpty {
+                        Text("Organized by \(organizer)").font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                rsvpBar
+                HStack(spacing: DT.s12) {
+                    legend("going", event.count(.going), DT.green)
+                    legend("maybe", event.count(.maybe), DT.amber)
+                    legend("no reply", event.count(.noReply), DT.textTertiary)
+                    if event.count(.declined) > 0 { legend("declined", event.count(.declined), DT.red) }
                 }
             }
         }
     }
 
-    private func statusDot(_ status: MeetingSnapshot.AttendeeStatus) -> some View {
-        let color: Color
-        switch status {
-        case .accepted:  color = .green
-        case .declined:  color = .red
-        case .tentative: color = .orange
-        case .pending:   color = .gray
-        case .unknown:   color = .gray.opacity(0.5)
-        }
-        return Circle().fill(color).frame(width: 7, height: 7)
-    }
-
-    // MARK: - Notes + footer
-
-    private func notesBlock(_ notes: String) -> some View {
-        VStack(alignment: .leading, spacing: DT.s8) {
-            Text("NOTES")
-                .font(.system(size: DT.f9, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(DT.textTertiary)
-            Text(notes)
-                .font(.system(size: DT.f11))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private var rsvpBar: some View {
+        let parts: [(Int, Color)] = [(event.count(.going), DT.green), (event.count(.maybe), DT.amber),
+                                     (event.count(.noReply), DT.textTertiary), (event.count(.declined), DT.red)]
+        return HStack(spacing: 2) {
+            ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                if part.0 > 0 { RoundedRectangle(cornerRadius: 3).fill(part.1).frame(height: 6).layoutPriority(Double(part.0)) }
+            }
         }
     }
 
-    private var snapshotFooter: some View {
+    private func legend(_ label: String, _ count: Int, _ color: Color) -> some View {
         HStack(spacing: 4) {
-            Image(systemName: "checkmark.seal")
-                .font(.system(size: DT.f9))
-            Text("Snapshot \(EventDetailBody.relativeIso(snapshotAt))")
-                .font(.system(size: DT.f9))
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text("\(count) \(label)").font(.system(size: DT.f11)).foregroundStyle(.secondary)
         }
-        .foregroundStyle(DT.textTertiary)
     }
 
-    // MARK: - Formatters
-
-    static func formatRange(_ start: Date, _ end: Date) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return "\(f.string(from: start)) — \(f.string(from: end))"
-    }
-
-    static func relativeIso(_ s: String) -> String {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: s) {
-            let r = RelativeDateTimeFormatter()
-            r.unitsStyle = .abbreviated
-            return r.localizedString(for: d, relativeTo: Date())
-        }
-        return s
-    }
-}
-
-// MARK: - EventDetailsPillView (compact)
-
-/// Compact pill rendering: title + time + attendee count. Reuses the same
-/// snapshot + file-watch path as the full widget.
-private struct EventDetailsPillView: View {
-    let services: SessionServices
-
-    @State private var watcher = WidgetFileWatcher()
-
-    var body: some View {
-        let _ = watcher.version
-        let dir = services.worktreePath
-        let snapshot = dir.flatMap { MeetingSnapshot.load(dir: $0) }
-
-        Group {
-            if let event = snapshot?.event {
-                VStack(alignment: .leading, spacing: DT.s8) {
-                    Text(event.title.isEmpty ? "(Untitled)" : event.title)
-                        .font(.system(size: DT.f13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                    Label(EventDetailBody.formatRange(event.startsAt, event.endsAt),
-                          systemImage: "clock")
-                        .font(.system(size: DT.f11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    if !event.attendees.isEmpty {
-                        Label("\(event.attendees.count) attendees",
-                              systemImage: "person.2")
-                            .font(.system(size: DT.f11))
-                            .foregroundStyle(DT.textTertiary)
-                    }
-                }
-                .padding(DT.s12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text("No event synced yet")
+    private func description(_ html: String) -> some View {
+        card {
+            VStack(alignment: .leading, spacing: DT.s8) {
+                Label("Description", systemImage: "doc.text")
+                    .font(.system(size: DT.f11, weight: .semibold)).foregroundStyle(.secondary)
+                MarkdownPreview(text: html, autoHeight: true)
+                    .frame(maxHeight: descriptionExpanded ? nil : 170, alignment: .top)
+                    .clipped()
+                Button(descriptionExpanded ? "Show less" : "Show more") { descriptionExpanded.toggle() }
+                    .buttonStyle(.plain)
                     .font(.system(size: DT.f11))
-                    .foregroundStyle(.secondary)
-                    .padding(DT.s12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundStyle(DT.systemAccent)
             }
         }
-        .onAppear {
-            if let dir { watcher.watch(MeetingSnapshot.path(dir: dir)) }
-        }
+    }
+
+    // MARK: Pieces
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .padding(DT.s12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
+            .overlay(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).strokeBorder(DT.chipStroke, lineWidth: 0.5))
+    }
+
+    private func chip(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: DT.f10, weight: .semibold))
+            .foregroundStyle(tint ?? .secondary)
+            .padding(.horizontal, 8).padding(.vertical, 2)
+            .background(Capsule().fill((tint ?? Color.primary).opacity(tint == nil ? 0.06 : 0.14)))
+    }
+
+    private func color(hex: String?) -> Color? {
+        guard var hex, hex.hasPrefix("#") else { return nil }
+        hex.removeFirst()
+        guard hex.count == 6, let value = UInt32(hex, radix: 16) else { return nil }
+        return Color(red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255, blue: Double(value & 0xFF) / 255)
     }
 }
-
-// MARK: - Widget entry-point ABI
 
 @_cdecl("work42_widget_sdk_version")
 public func work42_widget_sdk_version() -> Int32 { WidgetSDK.abiVersion }

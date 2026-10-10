@@ -2,15 +2,15 @@
   "id": "event",
   "name": "Event",
   "workflow": "meeting",
-  "layout_json": "[{\"id\":\"F1051525-4C28-4376-96BB-7A87D9FCA0A4\",\"templateId\":\"meetingBrief\",\"openItems\":[\"widget:event-details\",\"widget:permissions\",\"widget:people\"],\"pinnedItems\":[],\"isPlanView\":false},{\"id\":\"60B19321-A3C6-4496-982A-892466EDC889\",\"templateId\":\"meetingLive\",\"openItems\":[\"chat\",\"widget:recording\",\"widget:annotations\"],\"pinnedItems\":[],\"isPlanView\":false},{\"id\":\"E1B40221-0F3A-4D7D-A680-CF82E192A15E\",\"templateId\":\"meetingRecap\",\"openItems\":[\"widget:summary\",\"widget:recording\",\"widget:annotations\"],\"pinnedItems\":[],\"isPlanView\":false}]",
+  "layout_json": "[{\"id\":\"E656838B-504F-4ABF-94B8-FBB2D754E9EB\",\"templateId\":\"meetingLive\",\"openItems\":[\"chat\",\"widget:recording\"],\"pinnedItems\":[],\"isPlanView\":false,\"layoutTree\":{\"version\":1,\"root\":{\"split\":{\"direction\":\"horizontal\",\"fractions\":[0.5,0.5],\"children\":[{\"leaf\":{\"_0\":\"chat\"}},{\"leaf\":{\"_0\":\"widget:recording\"}}]}}}},{\"id\":\"176C7857-65E6-4013-96E6-B6BC325D0119\",\"templateId\":\"meetingBrief\",\"openItems\":[\"widget:brief\",\"widget:event-details\",\"widget:people\"],\"pinnedItems\":[],\"isPlanView\":false,\"layoutTree\":{\"version\":1,\"root\":{\"split\":{\"direction\":\"horizontal\",\"fractions\":[0.6,0.4],\"children\":[{\"leaf\":{\"_0\":\"widget:brief\"}},{\"split\":{\"direction\":\"vertical\",\"fractions\":[0.5,0.5],\"children\":[{\"leaf\":{\"_0\":\"widget:event-details\"}},{\"leaf\":{\"_0\":\"widget:people\"}}]}}]}}}},{\"id\":\"66F38214-217D-4C5F-B5BF-048353E10A70\",\"templateId\":\"meetingRecap\",\"openItems\":[\"widget:summary\",\"chat\",\"widget:recording\"],\"pinnedItems\":[],\"isPlanView\":false,\"layoutTree\":{\"version\":1,\"root\":{\"split\":{\"direction\":\"horizontal\",\"fractions\":[0.5,0.5],\"children\":[{\"leaf\":{\"_0\":\"widget:summary\"}},{\"split\":{\"direction\":\"vertical\",\"fractions\":[0.5,0.5],\"children\":[{\"leaf\":{\"_0\":\"chat\"}},{\"leaf\":{\"_0\":\"widget:recording\"}}]}}]}}}}]",
   "widgets": [
-    "widget:event-details",
-    "widget:permissions",
-    "widget:people",
     "chat",
     "widget:recording",
-    "widget:annotations",
-    "widget:summary"
+    "widget:brief",
+    "widget:event-details",
+    "widget:people",
+    "widget:summary",
+    "widget:permissions"
   ],
   "icon": "calendar",
   "enforce_capability_gate": true,
@@ -21,7 +21,9 @@
   "shows_in_session_list": true,
   "sort_order": 3,
   "session_skills": [
-    "meet42-prep"
+    "meet42-prep",
+    "meet42-brief",
+    "meet42-summary"
   ],
   "create_intent": "new-event",
   "args": [

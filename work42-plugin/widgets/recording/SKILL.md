@@ -18,12 +18,28 @@ Calendar owns global mic-open detection and session creation. The `meet42
 record` daemon only captures and responds to an explicit stop marker (plus its
 optional Work42 owner PID); it has no mic-close or UI policy.
 
+## Transcript avatars and speaker names
+
+Each transcript line shows a People-style avatar: **You** with your initials (from the linked event's current-user
+attendee, else "Y"), **Speaker N** with an "SN" avatar whose colour is stable for the meeting, and **Them** with a grey
+avatar. When the agent matched a speaker to an attendee in the Summary stage it writes `speakers.json` into the
+recording folder, `{"Speaker 1": {"name": "Marcus Lee", "email": "marcus@acme.com"}}` (`email` and `person_id` optional;
+the flat `{"Speaker 1": "Marcus Lee"}` form still works). That speaker's lines then show the person's name and the same
+avatar People shows (the colour comes from the email). The agent writes only confident matches; the rest stay Speaker N.
+
+## Header labels (every tab)
+
+"● REC mm:ss" (red) while this session is recording; "Recording didn't start" (amber) while the last Record press
+failed (the reason is in the tile's banner); "meet42 needs setup" (amber) while `meet42` is missing or any permission is
+not granted, which opens the permissions widget. The first two open this widget (`meet42://widget/recording`).
+
 ## Prerequisites
 
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
 on this, check `command -v meet42`: it must print a path. If it prints nothing, or a meet42 command fails
-because the tool is missing, follow the `meet42-setup` skill, which installs the signed release, grants its
-permissions and loads the calendar.
+because the tool is missing, ask the user whether to install it (never install it without their yes); if they
+agree, follow the `meet42-setup` skill, which installs the signed release, grants its permissions and loads the
+calendar.
 
 ## Tile
 

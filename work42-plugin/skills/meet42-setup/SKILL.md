@@ -9,8 +9,10 @@ description: |
 # meet42-setup — install and set up meet42
 
 meet42 is a separate, signed and notarized command-line tool (github.com/Work42-Ai/meet42), not part of the
-Work42 app. This plugin's widgets and skills call it. Follow these steps in order and stop at the first one that
-fails; say what failed instead of working around it.
+Work42 app. This plugin's widgets and skills call it. **Always ask the user first.** Before installing or updating anything, tell them what you are about to do (download the signed
+meet42 app from github.com/Work42-Ai/meet42 into `~/.work42` and link it into `~/.work42/bin`) and wait for a yes. If they
+decline, stop and carry on without meet42; do not install it later on your own. Then follow these steps in order and stop at
+the first one that fails; say what failed instead of working around it.
 
 ## 1. Install or update the tool
 
@@ -57,7 +59,7 @@ identity, so the prompts name meet42, not Work42 or the terminal.
 - `denied`: macOS will not ask again; ask the user to switch meet42 on in System Settings.
   `meet42 permissions open <name>` opens the right pane.
 
-The **meet42 permissions** widget on an event's Brief tab shows the same four rows with a button each.
+When any permission is not granted, open the **meet42 permissions** widget for the user with `work42 widget w_widget_permissions open` (it is listed for event sessions but on no tab) and walk them through its four rows: each has a button, **Request** for a permission macOS hasn't asked about yet and **Open Settings** for the rest.
 
 ## 3. Load the calendar
 

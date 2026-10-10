@@ -167,7 +167,10 @@ final class PermissionsWidget: Work42Widget, Work42WidgetCustomHeader {
     let id = "permissions"
     let title = "meet42 permissions"
     let icon = "lock.shield"
-    var linkIntents: [WidgetLinkIntentSpec] { [] }
+    var linkIntents: [WidgetLinkIntentSpec] {
+        // The "meet42 needs setup" label links here; the host reveals the widget before `perform`.
+        [WidgetLinkIntentSpec(matchers: [.regex(#"^meet42://widget/permissions$"#)], perform: { _ in })]
+    }
     var minSize: WidgetMinSize { WidgetMinSize(width: 300, height: 260) }
     var contentPadding: Double { 0 }
 
