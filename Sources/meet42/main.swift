@@ -7,7 +7,7 @@
 
 import Foundation
 
-let meet42Version = "0.2.0"
+let meet42Version = "0.3.0"
 
 let argv = CommandLine.arguments
 let command = argv.count > 1 ? argv[1] : "help"

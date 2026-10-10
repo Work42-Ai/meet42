@@ -109,6 +109,9 @@ public nonisolated enum CalendarEvent {
         /// appended to the session's `input.jsonl`. Idempotency
         /// guard against re-firing across app restarts.
         public let prepFiredAt: Date?
+        /// The event's calendar colour as `#RRGGBB`, stored by sync from `EKCalendar.cgColor`.
+        /// Nil until the calendar has been synced with this version.
+        public let calendarColor: String?
 
         public init(
             id: String,
@@ -130,7 +133,8 @@ public nonisolated enum CalendarEvent {
             syncedAt: Date,
             sessionId: String?,
             sessionDir: String?,
-            prepFiredAt: Date?
+            prepFiredAt: Date?,
+            calendarColor: String? = nil
         ) {
             self.id = id
             self.calendarId = calendarId
@@ -152,6 +156,7 @@ public nonisolated enum CalendarEvent {
             self.sessionId = sessionId
             self.sessionDir = sessionDir
             self.prepFiredAt = prepFiredAt
+            self.calendarColor = calendarColor
         }
     }
 

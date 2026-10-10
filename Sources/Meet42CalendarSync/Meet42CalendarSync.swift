@@ -242,8 +242,18 @@ public final class Meet42CalendarSync {
             syncedAt: syncedAt,
             sessionId: nil,
             sessionDir: nil,
-            prepFiredAt: nil
+            prepFiredAt: nil,
+            calendarColor: Self.hexColor(ek.calendar?.cgColor)
         )
+    }
+
+    /// `#RRGGBB` (sRGB, uppercase) for a calendar's colour, or nil when it has none.
+    nonisolated static func hexColor(_ color: CGColor?) -> String? {
+        guard let color,
+              let srgb = color.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil),
+              let c = srgb.components, c.count >= 3 else { return nil }
+        func byte(_ v: CGFloat) -> Int { max(0, min(255, Int((v * 255).rounded()))) }
+        return String(format: "#%02X%02X%02X", byte(c[0]), byte(c[1]), byte(c[2]))
     }
 
     private func mapSource(_ src: EKSource?) -> CalendarEvent.Source {

@@ -65,7 +65,7 @@ enum ReadCommands {
             CLI.fail("meet42 show: no event matches '\(target)'.")
         }
         if CLI.wantsJSON(args) {
-            CLI.emitJSON(item)
+            CLI.emitJSON(EventWithNotesHTML(item: item))
             return
         }
         CLI.printEventDetail(item)
@@ -146,5 +146,19 @@ enum ReadCommands {
             return
         }
         CLI.printEventTable(items)
+    }
+}
+
+/// `meet42 show --json`: the event exactly as stored, plus `notesHTML`, the event notes as sanitised HTML
+/// (see `NotesHTML`), which the Work42 widgets and the agent render instead of the raw text.
+private struct EventWithNotesHTML: Encodable {
+    let item: CalendarEvent.Item
+
+    private enum ExtraKeys: String, CodingKey { case notesHTML }
+
+    func encode(to encoder: any Encoder) throws {
+        try item.encode(to: encoder)
+        var extra = encoder.container(keyedBy: ExtraKeys.self)
+        try extra.encode(NotesHTML.sanitize(item.notes), forKey: .notesHTML)
     }
 }
