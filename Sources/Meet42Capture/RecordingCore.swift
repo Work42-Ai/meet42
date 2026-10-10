@@ -1,81 +1,45 @@
-// RecordingCore.swift — Shared in-app recording core.
+// RecordingCore.swift — meet42's recording core.
 //
-// The SINGLE TCC-owned recording entry point used by BOTH flow42 recording
-// and MeetingTranscriptionService. Owns:
+// The single entry point that owns a recording's audio capture. AUDIO ONLY — meet42 never records the screen:
 //
-//   (a) Audio capture — microphone via SCStream's captureMicrophone=true,
-//       delivering mic buffers (.microphone) and system-audio buffers (.audio)
-//       as separate SCStreamOutputType values.
+//   .microphone  — mic / "You" channel (16 kHz mono), via AVAudioEngine (MicrophoneCapture)
+//   .audio       — system audio / "Them" channel (16 kHz mono), via a Core Audio process tap (SystemAudioTap)
 //
-//   (b) SCStream — one ScreenCaptureKit stream delivering:
-//         .microphone  — mic / "You" channel (16 kHz mono)
-//         .audio       — system audio / "Them" channel (16 kHz mono)
-//       The stream still requires an SCContentFilter (a display) because
-//       macOS gates system-audio capture behind Screen-Recording permission;
-//       no `.screen` (video) output is added.
-//       SCStreamConfiguration + SCStream init shape copied from
-//       SimulatorWindowCaptureTransport (~lines 476–574).
+// The tap needs only macOS's "System Audio Recording Only" permission (no Screen Recording). See
+// AudioCapture.swift.
 //
-//   (c) Recording lifecycle/state — start/stop with state reported through
-//       StateFile.AppState/DerivedState so both consumers observe via the
-//       existing StateClient mtime-poll pipeline.
-//
-//   (d) Permission preflight — MicPermission.preflight() +
-//       CGPreflightScreenCaptureAccess/CGRequestScreenCaptureAccess in ONE
-//       place; denial returns a typed error naming mic vs screen.
-//
-// MULTI-SUBSCRIBER FAN-OUT API (subtask 2 refactor)
-// --------------------------------------------------
-// The old single-slot callbacks (`onMicBuffer`, `onSystemAudioBuffer`) have
-// been replaced by a multi-subscriber model so that multiple consumers
-// (e.g. SpeechTranscriber, meeting transcription) can each independently
-// subscribe to the same channel without clobbering each other.
-//
-// Subscribe API:
+// MULTI-SUBSCRIBER FAN-OUT API
+// ----------------------------
+// Several consumers (transcription, diarization) subscribe to the same channels without clobbering each other:
 //
 //   let token = RecordingCore.shared.addMicHandler { buf in … }
 //   let token = RecordingCore.shared.addSystemAudioHandler { buf in … }
 //   RecordingCore.shared.removeHandler(token)
 //
-// Tokens are opaque UInt64 values returned by each addXxxHandler call.
-// removeHandler(_:) is safe to call from any queue and is idempotent.
-// Handlers are invoked on SCStream's internal queue (nonisolated).
-// Fan-out is O(N subscribers) under NSLock — acceptable for the expected
-// small N across SpeechTranscriber + future consumers.
+// Tokens are opaque UInt64 values. removeHandler(_:) is safe from any queue and idempotent. Handlers run on
+// the capture queues (nonisolated); fan-out is O(N subscribers) under an NSLock.
 //
-// Design constraints:
-//   - Runs inside the GUI process (Work42App). TCC for mic + screen-recording
-//     is registered against the app's bundle identity. Screen-recording
-//     permission is still required because system-audio capture is gated on it,
-//     even though no video frames are captured.
-//   - Swift 6.2 strict concurrency. @MainActor default isolation throughout.
-//   - All logging via Log (stderr). Never print to stdout.
-//
-// SCStream: macOS 15+. captureMicrophone requires macOS 15+.
-//
-// NOTE: This core captures AUDIO ONLY (mic + system audio). The screen-video
-// capture/storage pipeline (VideoWriter / TimelineWriter / FrameExtractor and
-// the `.screen` stream output) was removed; only audio is delivered.
+// Swift 6.2 strict concurrency; public methods are @MainActor. All logging goes through Log (stderr), never
+// stdout.
 
 import AVFoundation
 import CoreMedia
 import Foundation
-import ScreenCaptureKit
 
 // MARK: - RecordingCore Errors
 
 /// Typed error naming the specific denied permission + recovery guidance,
-/// fulfilling AC22 (fail loud, name mic vs screen).
+/// fail loud, naming mic vs system audio.
 public enum RecordingCoreError: Error, LocalizedError, Sendable {
     /// Microphone permission denied before capture started.
     case microphoneDenied(message: String)
-    /// Screen-Recording permission denied before capture started.
-    case screenRecordingDenied
+    /// System Audio Recording permission denied before capture started.
+    case systemAudioDenied
     /// A recording is already active; stop it before starting another.
     case alreadyRecording
-    /// The SCStream failed to start.
+    /// The audio capture failed to start.
     case streamStartFailed(underlying: any Error)
-    /// A codec / configuration error prevented SCStream setup.
+    /// A configuration error prevented capture setup.
     case configurationFailed(String)
     /// The chosen microphone device is not currently connected.
     case microphoneDeviceUnavailable(name: String, uid: String)
@@ -84,12 +48,12 @@ public enum RecordingCoreError: Error, LocalizedError, Sendable {
         switch self {
         case .microphoneDenied(let msg):
             return "Microphone permission denied: \(msg)"
-        case .screenRecordingDenied:
-            return "Screen-Recording permission denied. Switch meet42 on in System Settings → Privacy & Security → Screen & System Audio Recording (`meet42 permissions open screen`), then start meet42 again."
+        case .systemAudioDenied:
+            return "System Audio Recording permission denied. Switch meet42 on in System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only (`meet42 permissions open systemAudio`), then start meet42 again."
         case .alreadyRecording:
             return "A recording is already active. Stop the current recording before starting another."
         case .streamStartFailed(let e):
-            return "SCStream failed to start: \(e.localizedDescription)"
+            return "Audio capture failed to start: \(e.localizedDescription)"
         case .configurationFailed(let reason):
             return "Recording configuration failed: \(reason)"
         case .microphoneDeviceUnavailable(let name, _):
@@ -100,7 +64,7 @@ public enum RecordingCoreError: Error, LocalizedError, Sendable {
 
 // MARK: - Buffer handler types
 
-/// Per-channel buffer handlers, delivered on the SCStream's internal queue.
+/// Per-channel buffer handlers, delivered on the capture queues.
 /// Both fire from nonisolated context — hop to @MainActor when needed.
 public typealias MicBufferHandler       = @Sendable (CMSampleBuffer) -> Void
 public typealias SystemAudioHandler     = @Sendable (CMSampleBuffer) -> Void
@@ -118,8 +82,8 @@ public struct SubscriptionToken: Sendable, Hashable {
 /// The lifecycle state of an active RecordingCore session.
 public enum RecordingCoreState: String, Sendable, Equatable {
     case idle
-    case starting     // preflight + SCStream setup in progress
-    case recording    // SCStream delivering buffers
+    case starting     // preflight + capture setup in progress
+    case recording    // capture delivering buffers
     case stopping     // teardown in progress
 }
 
@@ -166,8 +130,7 @@ public struct RecordingCoreSession: Sendable, Equatable {
 /// The core reports state through `StateFile`/`DerivedState` so the existing
 /// `StateClient` mtime-poll pipeline continues to drive UI (EdgeGlowView, recording glow).
 ///
-/// All public methods are `@MainActor`. The SCStream delegate methods are
-/// `nonisolated` as required by SCStream's internal queue.
+/// All public methods are `@MainActor`; the buffer fan-out runs nonisolated on the capture queues.
 @MainActor
 public final class RecordingCore: NSObject, @unchecked Sendable {
 
@@ -187,8 +150,7 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
     // MARK: - Multi-subscriber handler storage
     //
     // All subscriber dictionaries and the token counter are accessed exclusively
-    // under streamLock (same lock guarding _stream), matching the nonisolated(unsafe)
-    // pattern used by SimulatorWindowCaptureTransport.
+    // under streamLock (the same lock that guards the capture sources).
     //
     // Handlers are stored as [token: handler] dictionaries so O(1) removal.
     // Fan-out iterates the values() snapshot while NOT holding the lock to avoid
@@ -203,7 +165,7 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
 
     /// Subscribe to `.microphone` sample buffers (mic / "You").
     ///
-    /// - Parameter handler: Called on the SCStream internal queue.
+    /// - Parameter handler: Called on a capture queue.
     /// - Returns: A token. Pass to `removeHandler(_:)` to unsubscribe.
     public func addMicHandler(_ handler: @escaping MicBufferHandler) -> SubscriptionToken {
         let token = streamLock.withLock { () -> UInt64 in
@@ -217,7 +179,7 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
 
     /// Subscribe to `.audio` (system audio / "Them") sample buffers.
     ///
-    /// - Parameter handler: Called on the SCStream internal queue.
+    /// - Parameter handler: Called on a capture queue.
     /// - Returns: A token. Pass to `removeHandler(_:)` to unsubscribe.
     public func addSystemAudioHandler(_ handler: @escaping SystemAudioHandler) -> SubscriptionToken {
         let token = streamLock.withLock { () -> UInt64 in
@@ -231,7 +193,7 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
 
     /// Unsubscribe a handler previously registered via addXxxHandler.
     ///
-    /// Idempotent and safe to call from any queue (including the SCStream queue
+    /// Idempotent and safe to call from any queue (including a capture queue
     /// and deinit). Silently ignores unknown tokens.
     ///
     /// `nonisolated` so that a subscriber's deinit can call this without hopping
@@ -244,15 +206,11 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
         }
     }
 
-    // MARK: - Internal SCStream state
+    // MARK: - Internal capture state
 
-    // nonisolated(unsafe) + NSLock pattern matches SimulatorWindowCaptureTransport.
     private let streamLock = NSLock()
-    private nonisolated(unsafe) var _stream: SCStream?
-    // Saved SCContentFilter from the most recent start(), used by the hot-swap
-    // rebuild fallback in applySelectedMicrophoneDevice() so we can re-create
-    // the SCStream without calling SCShareableContent again.
-    private nonisolated(unsafe) var _contentFilter: SCContentFilter?
+    private var systemTap: SystemAudioTap?
+    private var microphone: MicrophoneCapture?
 
     // Buffer-in smoke counters (one per channel), guarded by streamLock.
     private nonisolated(unsafe) var _micBufferCount: Int = 0
@@ -260,27 +218,20 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
 
     // MARK: - Permission preflight (centralised, AC22)
 
-    /// Preflight both mic and screen-recording permissions before starting capture.
-    /// Returns a typed `RecordingCoreError` naming the specific denied permission
-    /// if either check fails. Fulfils AC22: fail loud, name mic vs screen.
+    /// Preflight the microphone and system-audio permissions before starting capture. When one is undecided
+    /// macOS shows its prompt here and this waits for the answer. Returns a typed `RecordingCoreError` naming
+    /// the denied permission, so the caller fails loudly instead of recording silence.
     public func preflightPermissions() async -> RecordingCoreError? {
-        // Both checks route through the unified Permissions catalog
-        // (Permission, Flow42Core) — the SAME single implementation the
-        // GUI authority PermissionsManager delegates to. RecordingCore can't
-        // import Work42App (it ships in Flow42Core and is consumed by the
-        // flow42 CLI too), so it talks to the catalog directly rather than
-        // to PermissionsManager.shared; the prompt mechanics are identical.
-        // RecordingCore runs in the foreground GUI process, so firing the
-        // catalog's prompts here satisfies the GUI-only-request rule.
-
-        // 1. Mic
-        if case .denied(let msg) = await Permission.microphone.preflight() {
+        // 1. Mic — only when this Mac has an input device at all. Without one there is nothing to record or
+        //    to ask permission for, and the recording carries system audio only.
+        if !MicInputDeviceStore.availableDevices().isEmpty,
+           case .denied(let msg) = await Permission.microphone.preflight() {
             return .microphoneDenied(message: msg)
         }
 
-        // 2. Screen Recording
-        if case .denied = await Permission.screenRecording.preflight() {
-            return .screenRecordingDenied
+        // 2. System audio.
+        if case .denied = await Permission.systemAudio.preflight() {
+            return .systemAudioDenied
         }
 
         return nil
@@ -292,7 +243,7 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
     ///
     /// - Parameter session: Identifies the session (slug + dir).
     /// - Throws: `RecordingCoreError` if already recording, permission denied, or
-    ///           SCStream fails to start.
+    ///           audio capture fails to start.
     ///
     /// On success the state transitions `idle → recording` and the
     /// `StateFile.AppState` is updated so `StateClient` observers (EdgeGlowView etc.)
@@ -331,62 +282,40 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
             micDeviceID = nil
         }
 
-        // Build SCStreamConfiguration.
-        let config = buildStreamConfiguration(micDeviceID: micDeviceID)
-
-        // Build SCContentFilter — a display is REQUIRED even though we capture
-        // no video: macOS gates system-audio capture behind a display content
-        // filter + Screen-Recording permission. We never add a `.screen` output,
-        // so no frames are delivered.
-        let filter: SCContentFilter
+        // System audio ("Them").
+        let tap = SystemAudioTap()
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false, onScreenWindowsOnly: false
-            )
-            guard let display = content.displays.first else {
-                state = .idle
-                throw RecordingCoreError.configurationFailed("No display found for SCStream")
-            }
-            filter = SCContentFilter(display: display, excludingWindows: [])
-        } catch let e as RecordingCoreError {
-            state = .idle
-            throw e
-        } catch {
-            state = .idle
-            throw RecordingCoreError.configurationFailed("SCShareableContent unavailable: \(error.localizedDescription)")
-        }
-
-        // Create and start the SCStream. AUDIO ONLY — we add `.audio` (system
-        // audio) + `.microphone` outputs but intentionally NO `.screen` output,
-        // so the stream delivers no video frames.
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-
-        do {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: nil)
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: nil)
-        } catch {
-            state = .idle
-            throw RecordingCoreError.configurationFailed("addStreamOutput failed: \(error.localizedDescription)")
-        }
-
-        do {
-            try await stream.startCapture()
+            try tap.start { [weak self] buffer in self?.deliverSystemAudio(buffer) }
         } catch {
             state = .idle
             throw RecordingCoreError.streamStartFailed(underlying: error)
         }
 
+        // Microphone ("You"). Not having one is not fatal: the recording still carries system audio.
+        let mic = MicrophoneCapture()
+        do {
+            try mic.start(deviceUID: micDeviceID) { [weak self] buffer in self?.deliverMicrophone(buffer) }
+            Log.info("[RecordingCore] microphone: \(micDeviceID ?? "System Default")")
+        } catch {
+            if micDeviceID != nil {
+                // The user picked a specific device and it failed: do not silently record without it.
+                tap.stop()
+                state = .idle
+                throw RecordingCoreError.streamStartFailed(underlying: error)
+            }
+            Log.info("[RecordingCore] no microphone — recording system audio only (\(error.localizedDescription))")
+        }
+
         streamLock.withLock {
-            _stream = stream
-            _contentFilter = filter
+            systemTap = tap
+            microphone = mic
         }
         activeSession = session
         state = .recording
 
-        // Persist state so StateClient observers (EdgeGlowView, recording glow) react.
         reportStateToStateFile(session: session)
 
-        Log.info("[RecordingCore] SCStream started — delivering .microphone / .audio buffers (audio only)")
+        Log.info("[RecordingCore] audio capture started — system audio tap + microphone (audio only)")
     }
 
     // MARK: - Stop
@@ -406,20 +335,14 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
         state = .stopping
         Log.info("[RecordingCore] stopping session=\(session?.sessionID ?? "<none>")")
 
-        let s: SCStream? = streamLock.withLock {
-            let existing = _stream
-            _stream = nil
-            _contentFilter = nil
+        let (tap, mic) = streamLock.withLock { () -> (SystemAudioTap?, MicrophoneCapture?) in
+            let existing = (systemTap, microphone)
+            systemTap = nil
+            microphone = nil
             return existing
         }
-
-        if let s {
-            do {
-                try await s.stopCapture()
-            } catch {
-                Log.info("[RecordingCore] stopCapture error (ignored): \(error.localizedDescription)")
-            }
-        }
+        mic?.stop()
+        tap?.stop()
 
         let counts = streamLock.withLock {
             (_micBufferCount, _audioBufferCount)
@@ -443,47 +366,27 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
         streamLock.withLock { (_micBufferCount, _audioBufferCount) }
     }
 
-    // MARK: - SCStreamConfiguration
+    // MARK: - Fan-out
 
-    /// Build the SCStreamConfiguration for the shared recording stream.
-    ///
-    /// - Parameter micDeviceID: The `AVCaptureDevice.uniqueID` of the mic to pin,
-    ///   or `nil` to leave `microphoneCaptureDeviceID` unset (System Default).
-    ///
-    /// captureMicrophone = true → .microphone sample buffers delivered separately.
-    /// capturesAudio = true     → .audio (system audio) sample buffers.
-    /// Both mic and system audio are delivered as separate SCStreamOutputType values.
-    ///
-    /// AUDIO ONLY: no `.screen` output is added, so the video-related config
-    /// settings are unnecessary and have been removed.
-    private func buildStreamConfiguration(micDeviceID: String?) -> SCStreamConfiguration {
-        let config = SCStreamConfiguration()
-
-        // Audio channels — the key property that enables mic + system audio.
-        config.capturesAudio            = true
-        config.captureMicrophone        = true
-
-        // Audio format: 16 kHz mono — what SpeechTranscriber expects downstream.
-        config.sampleRate               = 16_000
-        config.channelCount             = 1
-
-        // Pin the mic device when a specific selection is persisted (AC5 / AC6).
-        // microphoneCaptureDeviceID is NSString? (SCStream.h:363); nil = System Default.
-        if let uid = micDeviceID {
-            config.microphoneCaptureDeviceID = uid
-            let name = MicInputDeviceStore.availableDevices()
-                .first(where: { $0.uid == uid })?.name ?? uid
-            Log.info("[RecordingCore] mic device pinned: \(name) (\(uid))")
-        } else {
-            Log.info("[RecordingCore] mic device: System Default")
+    nonisolated private func deliverSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        let handlers: [SystemAudioHandler] = streamLock.withLock {
+            _audioBufferCount += 1
+            return Array(_systemAudioHandlers.values)
         }
+        for handler in handlers { handler(sampleBuffer) }
+    }
 
-        return config
+    nonisolated private func deliverMicrophone(_ sampleBuffer: CMSampleBuffer) {
+        let handlers: [MicBufferHandler] = streamLock.withLock {
+            _micBufferCount += 1
+            return Array(_micHandlers.values)
+        }
+        for handler in handlers { handler(sampleBuffer) }
     }
 
     // MARK: - Mic device change notification hook
 
-    /// Called on @MainActor just before a live mic hot-swap reconfigures the SCStream's
+    /// Called on @MainActor just before a live mic hot-swap replaces the
     /// mic device. Consumers that maintain state tied to a specific mic audio timeline
     /// (e.g. MeetingTranscriptionEngine's SpeechAnalyzer sessions) register here to
     /// finalize their current session and start a fresh one before the new device's
@@ -497,7 +400,7 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
     /// (EXC_BREAKPOINT in SpeechRecognizerWorker.preRunRecognition) when it receives
     /// audio from a different physical mic device on the same long-lived session.
     /// The fix is to finalize the old SpeechAnalyzer session and start a fresh one
-    /// coordinated with the SCStream device swap — this hook is the coordination point.
+    /// coordinated with the mic device swap — this hook is the coordination point.
     public var onMicDeviceWillChange: (@MainActor () async -> Void)?
 
     // MARK: - Live mic hot-swap (AC8 / AC10 / AC11)
@@ -511,12 +414,8 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
     ///   the next `start()` call will read the store fresh.
     /// - When recording: notifies `onMicDeviceWillChange` observers first (so
     ///   MeetingTranscriptionEngine can finalize/reset its SpeechAnalyzer before the
-    ///   device swap), then calls `SCStream.updateConfiguration(_:)` on the live stream
-    ///   (gap-free mic switch without stopping capture, AC8).
-    /// - Fallback: if `updateConfiguration` throws, stops the current SCStream, creates
-    ///   a new one with the updated config using the saved `SCContentFilter`, re-adds
-    ///   self as `.audio` + `.microphone` outputs, and starts capture — preserving
-    ///   all `_micHandlers`/`_systemAudioHandlers` subscriptions intact (AC8 / AC11).
+    ///   device swap), then replaces the microphone source while system audio keeps
+    ///   running. Every `_micHandlers`/`_systemAudioHandlers` subscription survives.
     public func applySelectedMicrophoneDevice() async throws {
         let sel = MicInputDeviceStore.selected()
         Log.info("[RecordingCore] applySelectedMicrophoneDevice: entry — state=\(state.rawValue) selection=\(sel?.name ?? "System Default")")
@@ -556,60 +455,23 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
             Log.info("[RecordingCore] applySelectedMicrophoneDevice: onMicDeviceWillChange is nil — no observer (flow42 path or setup() not called)")
         }
 
-        let config = buildStreamConfiguration(micDeviceID: micDeviceID)
-
-        let stream: SCStream? = streamLock.withLock { _stream }
-        guard let stream else {
-            Log.info("[RecordingCore] applySelectedMicrophoneDevice: no active stream — nothing to reconfigure")
-            return
+        // Replace the microphone source in place; system audio keeps running and every subscription
+        // (`_micHandlers` / `_systemAudioHandlers`) survives.
+        let old = streamLock.withLock { () -> MicrophoneCapture? in
+            let existing = microphone
+            microphone = nil
+            return existing
         }
+        old?.stop()
 
+        let replacement = MicrophoneCapture()
         do {
-            // Primary path: live hot-swap via updateConfiguration (no stream restart).
-            // The SCStream.h caveat about recording stops applies only to SCRecordingOutput,
-            // which this audio-only core does not use — updateConfiguration is safe here.
-            Log.info("[RecordingCore] applySelectedMicrophoneDevice: calling updateConfiguration (primary path)")
-            try await stream.updateConfiguration(config)
-            Log.info("[RecordingCore] applySelectedMicrophoneDevice: updateConfiguration succeeded — hot-swap complete")
+            try replacement.start(deviceUID: micDeviceID) { [weak self] buffer in self?.deliverMicrophone(buffer) }
+            streamLock.withLock { microphone = replacement }
+            Log.info("[RecordingCore] applySelectedMicrophoneDevice: switched to \(micDeviceID ?? "System Default")")
         } catch {
-            // Fallback: stop → new SCStream with updated config → re-add outputs → start.
-            // _micHandlers/_systemAudioHandlers are NOT touched; consumer subscriptions survive.
-            Log.info("[RecordingCore] applySelectedMicrophoneDevice: updateConfiguration FAILED (\(error.localizedDescription)) — using fallback rebuild")
-
-            let savedFilter: SCContentFilter? = streamLock.withLock { _contentFilter }
-            guard let savedFilter else {
-                Log.info("[RecordingCore] applySelectedMicrophoneDevice: no saved SCContentFilter — cannot rebuild stream")
-                return
-            }
-
-            do {
-                try await stream.stopCapture()
-                Log.info("[RecordingCore] applySelectedMicrophoneDevice: fallback stopCapture succeeded")
-            } catch {
-                Log.info("[RecordingCore] applySelectedMicrophoneDevice: stopCapture error during rebuild: \(error.localizedDescription)")
-            }
-
-            let newStream = SCStream(filter: savedFilter, configuration: config, delegate: nil)
-            do {
-                try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: nil)
-                try newStream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: nil)
-            } catch {
-                Log.info("[RecordingCore] applySelectedMicrophoneDevice: addStreamOutput failed during rebuild: \(error.localizedDescription)")
-                return
-            }
-
-            do {
-                try await newStream.startCapture()
-            } catch {
-                Log.info("[RecordingCore] applySelectedMicrophoneDevice: startCapture failed during rebuild: \(error.localizedDescription)")
-                return
-            }
-
-            streamLock.withLock {
-                _stream = newStream
-                _contentFilter = savedFilter
-            }
-            Log.info("[RecordingCore] applySelectedMicrophoneDevice: fallback stream rebuild succeeded")
+            Log.info("[RecordingCore] applySelectedMicrophoneDevice: could not start the new microphone: \(error.localizedDescription)")
+            throw RecordingCoreError.streamStartFailed(underlying: error)
         }
     }
 
@@ -630,63 +492,3 @@ public final class RecordingCore: NSObject, @unchecked Sendable {
         Log.info("[RecordingCore] recording cleared → idle")
     }
 }
-
-// MARK: - SCStreamOutput (nonisolated — SCStream calls on its own queue)
-
-extension RecordingCore: SCStreamOutput {
-
-    /// Receive a sample buffer from SCStream.
-    ///
-    /// MUST be nonisolated: SCStream dispatches on its internal queue.
-    /// Shape mirrors SimulatorWindowCaptureTransport.stream(_:didOutputSampleBuffer:of:).
-    ///
-    /// Fan-out: for each channel, snapshot the handler dictionary under the lock,
-    /// then invoke each handler WITHOUT holding the lock (avoids deadlock if a
-    /// handler calls removeHandler).
-    nonisolated public func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of outputType: SCStreamOutputType
-    ) {
-        switch outputType {
-        case .audio:
-            let handlers: [SystemAudioHandler] = streamLock.withLock {
-                _audioBufferCount += 1
-                return Array(_systemAudioHandlers.values)
-            }
-            for h in handlers { h(sampleBuffer) }
-
-        case .microphone:
-            let handlers: [MicBufferHandler] = streamLock.withLock {
-                _micBufferCount += 1
-                return Array(_micHandlers.values)
-            }
-            for h in handlers { h(sampleBuffer) }
-
-        case .screen:
-            // Video frames are not consumed by the capture engine.
-            break
-
-        @unknown default:
-            break
-        }
-    }
-}
-
-// MARK: - SCStreamDelegate (nonisolated — optional, handles stream errors)
-
-extension RecordingCore: SCStreamDelegate {
-
-    nonisolated public func stream(_ stream: SCStream, didStopWithError error: any Error) {
-        Log.info("[RecordingCore] SCStream stopped with error: \(error.localizedDescription)")
-        // Hop to @MainActor to update state safely.
-        Task { @MainActor in
-            if self.state == .recording {
-                self.state = .idle
-                self.activeSession = nil
-                self.clearStateFile()
-            }
-        }
-    }
-}
-

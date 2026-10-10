@@ -6,7 +6,7 @@
 // reproduces ONLY the surface the ported capture code actually touches:
 //
 //   • Permission.microphone.preflight()        (RecordingCore)
-//   • Permission.screenRecording.preflight()   (RecordingCore)
+//   • Permission.systemAudio.preflight()   (RecordingCore)
 //   • Permission.speechModel.status            (MeetingTranscriptionEngine)
 //   • Permission.ensureLocaleReserved(_:logPrefix:)
 //   • Locale.isEquivalent(to:)                 (BCP-47 identifier compare)
@@ -56,7 +56,7 @@ extension Locale {
 /// The subset of macOS privacy / capability checks the capture engine needs.
 public enum Permission: String, Sendable, Equatable {
     case microphone
-    case screenRecording
+    case systemAudio
     case speechModel
 
     // MARK: - Status
@@ -66,9 +66,12 @@ public enum Permission: String, Sendable, Equatable {
         case .microphone:
             return Self.map(AVCaptureDevice.authorizationStatus(for: .audio))
 
-        case .screenRecording:
-            // CG has no notDetermined; true→authorized, false→denied.
-            return CGPreflightScreenCaptureAccess() ? .authorized : .denied
+        case .systemAudio:
+            switch SystemAudioPermission.status() {
+            case .granted: return .authorized
+            case .denied: return .denied
+            case .notDetermined: return .notDetermined
+            }
 
         case .speechModel:
             if #available(macOS 26, *) {
@@ -91,9 +94,9 @@ public enum Permission: String, Sendable, Equatable {
             }
             Log.info("[Permission] microphone request → granted=\(granted)")
 
-        case .screenRecording:
-            let prompted = CGRequestScreenCaptureAccess()
-            Log.info("[Permission] screenRecording request → prompted=\(prompted)")
+        case .systemAudio:
+            let result = await SystemAudioPermission.request()
+            Log.info("[Permission] systemAudio request → \(result)")
 
         case .speechModel:
             await Self.requestSpeechModel()
@@ -123,10 +126,11 @@ public enum Permission: String, Sendable, Equatable {
             return "Microphone access is required to record meeting audio. "
                 + "Switch meet42 on under System Settings → Privacy & Security → "
                 + "Microphone (`meet42 permissions open microphone`), then try again."
-        case .screenRecording:
-            return "Screen & System Audio Recording access is required to capture system "
-                + "audio. Switch meet42 on under System Settings → Privacy & Security "
-                + "→ Screen & System Audio Recording (`meet42 permissions open screen`), then start meet42 again."
+        case .systemAudio:
+            return "System Audio Recording access is required to capture the other side of "
+                + "a call. Switch meet42 on under System Settings → Privacy & Security "
+                + "→ Screen & System Audio Recording → System Audio Recording Only "
+                + "(`meet42 permissions open systemAudio`), then start meet42 again."
         case .speechModel:
             return "On-device speech recognition is unavailable. Live "
                 + "transcription requires macOS 26+ with a supported Neural "

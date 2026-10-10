@@ -15,13 +15,14 @@ public enum Meet42Permission: String, CaseIterable, Codable, Sendable {
     case microphone
     /// Speech recognition: on-device transcription.
     case speech
-    /// Screen & system audio recording: hear the other side of a call.
-    case screen
+    /// System audio recording only (macOS "System Audio Recording Only"): hear the other side of a call.
+    /// meet42 never records the screen.
+    case systemAudio
 
     /// The name a user types after `meet42 permissions request|open`. Case-insensitive.
     public init?(argument: String) {
         let key = argument.lowercased()
-        guard let match = Meet42Permission.allCases.first(where: { $0.rawValue == key }) else { return nil }
+        guard let match = Meet42Permission.allCases.first(where: { $0.rawValue.lowercased() == key }) else { return nil }
         self = match
     }
 
@@ -31,7 +32,7 @@ public enum Meet42Permission: String, CaseIterable, Codable, Sendable {
         case .calendar: return "Calendar"
         case .microphone: return "Microphone"
         case .speech: return "Speech recognition"
-        case .screen: return "Screen & system audio"
+        case .systemAudio: return "System audio"
         }
     }
 
@@ -42,13 +43,13 @@ public enum Meet42Permission: String, CaseIterable, Codable, Sendable {
         case .calendar: return base + "Privacy_Calendars"
         case .microphone: return base + "Privacy_Microphone"
         case .speech: return base + "Privacy_SpeechRecognition"
-        case .screen: return base + "Privacy_ScreenCapture"
+        case .systemAudio: return base + "Privacy_AudioCapture"
         }
     }
 
-    /// Screen recording has no yes/no prompt: macOS only lists the app and the user switches it on in
-    /// System Settings, after which meet42 must be started again. Every other permission can be requested.
-    public var canBeRequestedWithPrompt: Bool { self != .screen }
+    /// Every permission can be requested with the system prompt; once the user has answered, macOS never
+    /// asks again and only System Settings can change it.
+    public var canBeRequestedWithPrompt: Bool { true }
 }
 
 /// A permission's state, normalised across the four different system APIs.
@@ -103,9 +104,6 @@ public enum Meet42PermissionReport {
         switch (entry.status, entry.name) {
         case (.granted, _):
             return nil
-        case (_, .screen):
-            return "Switch meet42 on in System Settings → Privacy & Security → Screen & System Audio Recording, "
-                + "then run meet42 again. (`meet42 permissions open screen` opens that page.)"
         case (.restricted, _):
             return "\(entry.name.displayName) is restricted on this Mac (a profile or parental control) and "
                 + "can't be changed here."

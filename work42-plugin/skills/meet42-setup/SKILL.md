@@ -1,7 +1,7 @@
 ---
 name: meet42-setup
 description: |
-  Install and set up the meet42 command-line tool: download the signed release into ~/.work42/bin, verify it,
+  Install and set up the meet42 command-line tool: download the signed release, install it as ~/.work42/meet42.app with the command linked into ~/.work42/bin, verify it,
   grant its macOS permissions and load the calendar. Use it whenever `command -v meet42` prints nothing, a
   meet42 command fails because the tool is missing or too old, or the user asks to set up or update meet42.
 ---
@@ -26,24 +26,35 @@ fails; say what failed instead of working around it.
    ```
 
    `shasum` must print `meet42.zip: OK`. If it does not, stop and tell the user; do not install the file.
-3. Unpack it and check it is signed by Work42's Developer ID before trusting it:
+3. Unpack it (it is a small app bundle, `meet42.app`) and check it is signed by Work42's Developer ID before
+   trusting it:
 
    ```bash
    ditto -x -k meet42.zip .
-   codesign -dv --verbose=2 ./meet42 2>&1 | grep -E "Identifier=com.work42.meet42|TeamIdentifier=74RFQFPVQ9"
+   codesign --verify --deep --strict meet42.app
+   codesign -dv --verbose=2 meet42.app 2>&1 | grep -E "Identifier=com.work42.meet42|TeamIdentifier=74RFQFPVQ9"
    ```
 
-   Both lines must print. If not, stop and tell the user.
+   Both `Identifier` and `TeamIdentifier` lines must print and `--verify` must print nothing. If not, stop and
+   tell the user.
 4. If a recording is running (`meet42 record status`), do not replace the tool; ask the user to stop it first.
-   Otherwise: `mv ./meet42 ~/.work42/bin/meet42 && meet42 --version`.
+   Otherwise put the app in place and link the command:
+
+   ```bash
+   rm -rf ~/.work42/meet42.app && mv meet42.app ~/.work42/meet42.app
+   ln -sf ~/.work42/meet42.app/Contents/MacOS/meet42 ~/.work42/bin/meet42
+   meet42 --version
+   ```
+
+   The app is what macOS knows as "meet42" in System Settings → Privacy & Security.
 
 ## 2. Permissions
 
-`meet42 permissions --json` lists `calendar`, `microphone`, `speech` and `screen`. meet42 has its own macOS
+`meet42 permissions --json` lists `calendar`, `microphone`, `speech` and `systemAudio`. meet42 has its own macOS
 identity, so the prompts name meet42, not Work42 or the terminal.
 
 - `not_determined`: run `meet42 permissions request <name>`; macOS shows a prompt. Tell the user to allow it.
-- `denied`, and `screen` (macOS has no prompt for it): ask the user to switch meet42 on in System Settings.
+- `denied`: macOS will not ask again; ask the user to switch meet42 on in System Settings.
   `meet42 permissions open <name>` opens the right pane.
 
 The **meet42 permissions** widget on an event's Brief tab shows the same four rows with a button each.

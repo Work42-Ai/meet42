@@ -7,7 +7,7 @@
 
 import Foundation
 
-let meet42Version = "0.1.0"
+let meet42Version = "0.2.0"
 
 let argv = CommandLine.arguments
 let command = argv.count > 1 ? argv[1] : "help"
@@ -95,13 +95,13 @@ enum Dispatcher {
         Permissions:
           permissions [--json]
                 Status of the four privacy permissions meet42 needs, in the
-                order calendar, microphone, speech, screen: granted, denied,
+                order calendar, microphone, speech, systemAudio: granted, denied,
                 not_determined or restricted.
-          permissions request <calendar|microphone|speech|screen> [--json]
+          permissions request <calendar|microphone|speech|systemAudio> [--json]
                 Show macOS's prompt for one permission (granted → exit 0).
                 macOS asks only once: a denied permission is switched on in
-                System Settings. Screen recording has no prompt at all.
-          permissions open <calendar|microphone|speech|screen>
+                System Settings.
+          permissions open <calendar|microphone|speech|systemAudio>
                 Open that permission's System Settings page.
 
         Sync / capture:

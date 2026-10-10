@@ -10,15 +10,19 @@ Nothing leaves your Mac: audio is transcribed on-device, and the calendar and pe
 
 ## Install
 
-Download the latest signed, notarized release, check its checksum, and put it in `~/.work42/bin`
-(Work42 puts that folder on `PATH` for its agent sessions and widget commands):
+meet42 is a small signed, notarized app bundle (`meet42.app`, no window and no Dock icon; the command-line tool is
+its executable). macOS shows its permission prompts reliably only for an app bundle, and they name "meet42".
+Download the latest release, check its checksum, put the app in `~/.work42` and link the command into
+`~/.work42/bin` (Work42 puts that folder on `PATH` for its agent sessions and widget commands):
 
 ```bash
 mkdir -p ~/.work42/bin && cd "$(mktemp -d)"
 curl -fsSLO https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip
 curl -fsSLO https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip.sha256
 shasum -a 256 -c meet42.zip.sha256          # must print: meet42.zip: OK
-ditto -x -k meet42.zip ~/.work42/bin/
+ditto -x -k meet42.zip .
+rm -rf ~/.work42/meet42.app && mv meet42.app ~/.work42/meet42.app
+ln -sf ~/.work42/meet42.app/Contents/MacOS/meet42 ~/.work42/bin/meet42
 meet42 --version
 ```
 
@@ -33,17 +37,16 @@ meet42 asks macOS for four permissions, each shown under the name **meet42** (it
 | Calendar | list meetings and prepare sessions |
 | Microphone | record meeting audio locally |
 | Speech recognition | on-device transcription |
-| Screen & system audio recording | hear the other side of a call |
+| System audio recording only | hear the other side of a call (meet42 never records your screen) |
 
 ```bash
 meet42 permissions                       # status of all four
 meet42 permissions request microphone    # show macOS's prompt for one
-meet42 permissions open screen           # open its System Settings page
+meet42 permissions open systemAudio      # open its System Settings page
 ```
 
-macOS asks only once per permission; one that was denied is switched on in System Settings. Screen & system
-audio has no prompt at all: switch meet42 on under *Privacy & Security → Screen & System Audio Recording* and
-start meet42 again. `meet42 permissions --json` prints `[{"name":"calendar","status":"granted"},…]` with
+macOS asks only once per permission; one that was denied is switched on in System Settings.
+`meet42 permissions --json` prints `[{"name":"calendar","status":"granted"},…]` with
 statuses `granted`, `denied`, `not_determined` and `restricted`.
 
 ## Use

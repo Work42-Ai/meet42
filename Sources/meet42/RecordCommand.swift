@@ -35,7 +35,7 @@
 // without daemonizing anything itself — this is the single source of truth
 // the rest of the pipeline reads instead of session storage.
 //
-// ⚠️ Runtime (device selection, TCC for mic + screen recording) can't be
+// ⚠️ Runtime (device selection, TCC for mic + system audio) can't be
 // verified from a plain `swift build`; the control flow is what matters here.
 
 import Foundation
@@ -130,17 +130,11 @@ enum RecordCommand {
                 exit(0)
             }
 
-            // Hand the recording's identity back to the caller BEFORE
-            // daemonizing. `Meet42Daemon.daemonize` below calls `execve`,
-            // which replaces this process's image but preserves open file
-            // descriptors (including stdout) — so a caller with a Pipe on
-            // this process sees this line regardless of what happens next
-            // (the re-exec, then the slow RecordingCore.start further down
-            // in runDaemon). This is the ONLY place it's printed — the
-            // re-exec'd entry (isReexec == true) skips this whole block.
-            // execve discards any unflushed C stdio buffer, so the explicit
-            // fflush is required, not just stylistic.
-            emitStarted(recordingId: recordingId, dir: dir)
+            // The caller learns the outcome from ONE stdout line printed by the daemon side (runDaemon)
+            // once capture has really started or failed: `{"started":true,…}` or `{"started":false,
+            // "reason":…}`. Printing "started" any earlier would report success for a recording that is
+            // about to fail on a missing permission. The daemonizing execve keeps stdout open, so a caller
+            // holding a pipe on this process still receives the line.
         }
 
         var reexecArgv = ["record", "start", "--recording-id", recordingId, "--dir", dir]
@@ -180,6 +174,23 @@ enum RecordCommand {
         fflush(stdout)
     }
 
+    /// `{"started":false,"reason":"system_audio_denied","message":"…"}`: what the caller prints or shows.
+    private static func emitStartFailed(_ error: any Error) {
+        let reason: String
+        switch error as? RecordingCoreError {
+        case .systemAudioDenied?: reason = "system_audio_denied"
+        case .microphoneDenied?: reason = "microphone_denied"
+        case .microphoneDeviceUnavailable?: reason = "microphone_unavailable"
+        default: reason = "capture_failed"
+        }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["started": false, "reason": reason, "message": error.localizedDescription],
+            options: [.sortedKeys]
+        ), let line = String(data: data, encoding: .utf8) else { return }
+        print(line)
+        fflush(stdout)
+    }
+
     private static func runDaemon(
         recordingId: String, dir: String, device: String?, app: String,
         bundleId: String, ownerPid: Int32?
@@ -209,8 +220,10 @@ enum RecordCommand {
                 )
             )
         } catch {
-            CLI.fail("meet42 record: RecordingCore failed to start: \(error)", code: 2)
+            emitStartFailed(error)
+            CLI.fail("meet42 record: RecordingCore failed to start: \(error.localizedDescription)", code: 2)
         }
+        emitStarted(recordingId: recordingId, dir: dir)
 
         // Claim the singleton slot now that capture has actually started —
         // this is the single source of truth every other surface reads via

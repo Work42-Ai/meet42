@@ -1,7 +1,7 @@
 // Widget.swift — meet42's Permissions widget (WOR-65).
 //
 // A small tile on the meet42 session's Brief tab that shows, one row each, the four macOS privacy permissions
-// meet42 needs (Calendar, Microphone, Speech recognition, Screen & system audio) and gives each its own
+// meet42 needs (Calendar, Microphone, Speech recognition, System audio) and gives each its own
 // action: Request (macOS has never been asked) or Open Settings (anything else). Every fact and every action
 // comes from the `meet42` CLI:
 //
@@ -45,8 +45,8 @@ struct PermissionInfo {
               symbol: "mic.fill", tile: Color(red: 1.00, green: 0.62, blue: 0.04)),
         .init(name: "speech", title: "Speech recognition", purpose: "On-device transcription",
               symbol: "waveform", tile: Color(red: 0.37, green: 0.36, blue: 0.90)),
-        .init(name: "screen", title: "Screen & system audio", purpose: "Hear the other side of the call",
-              symbol: "rectangle.on.rectangle", tile: Color(red: 0.19, green: 0.69, blue: 0.78)),
+        .init(name: "systemAudio", title: "System audio", purpose: "Hear the other side of the call",
+              symbol: "speaker.wave.2.fill", tile: Color(red: 0.19, green: 0.69, blue: 0.78)),
     ]
 
     static func info(for name: String) -> PermissionInfo? { all.first { $0.name == name } }
@@ -62,7 +62,7 @@ enum PermissionPresentation {
         case "granted": return "Granted"
         case "not_determined": return "Not asked"
         case "restricted": return "Restricted"
-        case "denied": return name == "screen" ? "Off" : "Denied"
+        case "denied": return "Denied"
         default: return status
         }
     }
@@ -71,14 +71,14 @@ enum PermissionPresentation {
         switch status {
         case "granted": return .good
         case "restricted": return .warn
-        case "denied": return name == "screen" ? .warn : .bad
+        case "denied": return .bad
         default: return .neutral
         }
     }
 
-    /// Request only when macOS has never been asked (and a prompt exists); everything else opens Settings.
+    /// Request only when macOS has never been asked; everything else opens Settings.
     static func action(name: String, status: String) -> Action {
-        status == "not_determined" && name != "screen" ? .request : .openSettings
+        status == "not_determined" ? .request : .openSettings
     }
 
     static func summary(_ rows: [PermissionRow]) -> String {
@@ -254,18 +254,6 @@ private struct ReadyView: View {
                 }
                 .background(RoundedRectangle(cornerRadius: DT.rCard + 2, style: .continuous).fill(DT.chipFill))
                 .overlay(RoundedRectangle(cornerRadius: DT.rCard + 2, style: .continuous).strokeBorder(DT.chipStroke, lineWidth: 0.5))
-                if rows.contains(where: { $0.name == "screen" && $0.status != "granted" }) {
-                    Label {
-                        Text("Screen & system audio can only be switched on in System Settings \u{2192} Privacy & Security \u{2192} Screen & System Audio Recording \u{2192} meet42. Come back here and it updates on its own.")
-                            .font(.system(size: DT.f10))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "info.circle").foregroundStyle(.secondary)
-                    }
-                    .padding(DT.s12)
-                    .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
-                }
             }
             .padding(.horizontal, DT.s16)
             .padding(.bottom, DT.s16)
