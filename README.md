@@ -49,6 +49,10 @@ macOS asks only once per permission; one that was denied is switched on in Syste
 `meet42 permissions --json` prints `[{"name":"calendar","status":"granted"},…]` with
 statuses `granted`, `denied`, `not_determined` and `restricted`.
 
+`meet42 show <event_id|next> --json` returns the event as stored plus `notesHTML` (the notes as sanitised HTML:
+formatting tags and http/https/mailto links only) and `calendarColor` (`#RRGGBB`, once synced). Calendar sync never
+deletes an event that is linked to a session.
+
 ## Use
 
 ```bash

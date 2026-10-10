@@ -78,7 +78,8 @@ public final class CalendarStore {
       synced_at       TEXT NOT NULL,
       session_id      TEXT,
       session_dir     TEXT,
-      prep_fired_at   TEXT
+      prep_fired_at   TEXT,
+      calendar_color  TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_calendar_events_starts
       ON calendar_events(starts_at);
@@ -213,6 +214,7 @@ public final class CalendarStore {
             ("session_dir", "TEXT"),
             ("prep_fired_at", "TEXT"),
             ("meeting_url", "TEXT"),
+            ("calendar_color", "TEXT"),
         ]
         let existing = try queryColumns(table: "calendar_events")
         for (name, type) in required where !existing.contains(name) {
@@ -246,7 +248,7 @@ public final class CalendarStore {
                    notes, location, starts_at, ends_at, all_day,
                    organizer, attendees_json, status, url, meeting_url,
                    last_modified, synced_at, session_id, session_dir,
-                   prep_fired_at
+                   prep_fired_at, calendar_color
             FROM calendar_events
             WHERE starts_at >= ? AND starts_at < ?
             """
@@ -276,7 +278,7 @@ public final class CalendarStore {
                    notes, location, starts_at, ends_at, all_day,
                    organizer, attendees_json, status, url, meeting_url,
                    last_modified, synced_at, session_id, session_dir,
-                   prep_fired_at
+                   prep_fired_at, calendar_color
             FROM calendar_events WHERE event_id = ?
             """
         let rows = try query(
@@ -297,7 +299,7 @@ public final class CalendarStore {
                    notes, location, starts_at, ends_at, all_day,
                    organizer, attendees_json, status, url, meeting_url,
                    last_modified, synced_at, session_id, session_dir,
-                   prep_fired_at
+                   prep_fired_at, calendar_color
             FROM calendar_events
             WHERE starts_at >= ? AND (status IS NULL OR status != 'canceled')
             ORDER BY starts_at ASC LIMIT 1
@@ -328,7 +330,7 @@ public final class CalendarStore {
     // MARK: - Writes
 
     /// Upsert one event row. Called by `CalendarSyncService` per
-    /// `EKEvent` in the active window. Preserves `session_id`,
+    /// `EKEvent` in the active window. Preserves `session_id`, `calendar_color` (when the new value is nil),
     /// `session_dir`, `prep_fired_at` on update so re-sync doesn't
     /// wipe scheduler bookkeeping.
     public func upsert(_ item: CalendarEvent.Item) throws {
@@ -337,8 +339,8 @@ public final class CalendarStore {
               (event_id, calendar_id, calendar_title, source, title,
                notes, location, starts_at, ends_at, all_day,
                organizer, attendees_json, status, url, meeting_url,
-               last_modified, synced_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               last_modified, synced_at, calendar_color)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(event_id) DO UPDATE SET
               calendar_id     = excluded.calendar_id,
               calendar_title  = excluded.calendar_title,
@@ -355,7 +357,8 @@ public final class CalendarStore {
               url             = excluded.url,
               meeting_url     = excluded.meeting_url,
               last_modified   = excluded.last_modified,
-              synced_at       = excluded.synced_at
+              synced_at       = excluded.synced_at,
+              calendar_color  = COALESCE(excluded.calendar_color, calendar_events.calendar_color)
             """
         let attendeesJSON = encodeAttendees(item.attendees)
         try exec(sql, bind: { stmt in
@@ -376,6 +379,7 @@ public final class CalendarStore {
             bindOpt(stmt, 15, item.meetingURL)
             bindOpt(stmt, 16, item.lastModified.map(Self.iso.string(from:)))
             sqlite3_bind_text(stmt, 17, Self.iso.string(from: item.syncedAt), -1, SQLITE_TRANSIENT_CAL)
+            bindOpt(stmt, 18, item.calendarColor)
         })
     }
 
@@ -401,6 +405,7 @@ public final class CalendarStore {
             let sql = """
                 DELETE FROM calendar_events
                 WHERE starts_at >= ? AND starts_at < ?
+                  AND session_id IS NULL
                   AND event_id NOT IN (\(placeholders))
                 """
             try exec(sql, bind: { stmt in
@@ -559,6 +564,7 @@ public final class CalendarStore {
         let sessionId = stringColumn(stmt, 17)
         let sessionDir = stringColumn(stmt, 18)
         let prepFiredAt = parseDate(stringColumn(stmt, 19))
+        let calendarColor = stringColumn(stmt, 20)
         return CalendarEvent.Item(
             id: id,
             calendarId: calId,
@@ -579,7 +585,8 @@ public final class CalendarStore {
             syncedAt: syncedAt,
             sessionId: sessionId,
             sessionDir: sessionDir,
-            prepFiredAt: prepFiredAt
+            prepFiredAt: prepFiredAt,
+            calendarColor: calendarColor
         )
     }
 
