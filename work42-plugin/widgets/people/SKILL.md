@@ -1,21 +1,25 @@
 ---
 name: widget-people
-description: The meet42 People widget — attendee profiles for the current event.
+description: |
+  How the People widget (session tab kindId widget:people) works on a meet42 meeting
+  session: the guests of the calendar event grouped by reply, and the header avatar label.
 ---
 
 # People widget
 
-Read-only. Shows the event's attendees with their accumulated profile from
-meet42's people store: display name, email, shared-meeting count, and last-seen
-(relative). Organizer / you chips come from the event's attendee list.
+Shows the guests of the session's calendar event, read live from `meet42 show <event_id> --json` (the id is the
+session's `meeting/event_id`; there is no `meeting.json` and no `meet42 people` call), on appear and every 60 seconds.
 
-- **Data source:** shells `meet42 people --session-dir <dir> --json` (the
-  standalone meet42 CLI reads its own `people.db`); attendee organizer/you flags
-  come from `<dir>/meeting.json`. The widget imports no calendar/people type.
-- **Empty state:** "No attendee data" when there is no `meeting.json` or it
-  lists no attendees; "No accumulated data yet" when attendees exist but have no
-  recorded shared meetings yet.
-- **Pill:** `makePillView` renders a compact attendee list so People can float.
+**Summary:** an avatar stack (up to 4), "N people" and "a going · b maybe · c no reply". **Groups:** Going (accepted),
+Maybe (tentative), No reply (pending and unknown) and Declined; empty groups are hidden. **Rows:** an initials avatar
+whose colour comes from the email (else the name; the transcript and the header label use the same avatar), the
+name (else the email), Organizer and You chips, the email under the name when both exist, and the reply icon.
+
+**Not linked / no guests:** an event session created without a calendar event shows "No guest list". If `meet42` is
+missing or `show` fails, the widget shows the error and the command that failed.
+
+**Header label (every tab):** one grouped pill with up to 3 avatar segments and "N people · a going", amber while
+anyone is tentative, pending or unknown. It opens this widget (`meet42://widget/people`).
 
 ## Prerequisites
 
