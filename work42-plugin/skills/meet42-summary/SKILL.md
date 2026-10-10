@@ -15,8 +15,10 @@ folder `templates/` next to this file has one template per kind of meeting (`gen
 ## Steps
 
 1. Read the whole transcript (`conversation.jsonl` in the recording directory, from `work42 storage get
-   meeting/recording_dir`), the event (`meet42 show "$(work42 storage get meeting/event_id)" --json`) and the
-   `meeting-brief` artifact. Read all of the transcript before writing anything. Each transcript line has
+   meeting/recording_dir | tr -d '"'`), the event (`meet42 show "$(work42 storage get meeting/event_id | tr -d '"')" --json`)
+   and the `meeting-brief` artifact. Storage values print as JSON strings in quotes; `tr -d '"'` strips them.
+   To link an issue or pull request someone mentioned, look it up with the CLIs of the session's data-source widgets
+   (`work42 widget list`, open or closed, load each skill) rather than guessing a URL. Read all of the transcript before writing anything. Each transcript line has
    `audioStartSeconds`: use it for the `mm:ss` times on decisions, concerns and key moments.
 2. **Pick the same template type as the brief** (its eyebrow says "Standup brief", "1:1 brief", …). If there is no
    brief, choose by the event as the brief skill describes, and use `general` when none fits.

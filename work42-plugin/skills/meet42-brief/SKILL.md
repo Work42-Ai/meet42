@@ -30,13 +30,17 @@ The brief's eyebrow names its type ("Standup brief"); the summary stage uses the
 
 ## Steps
 
-1. Read the event: `meet42 show "$(work42 storage get meeting/event_id)" --json` (title, time, location, meeting
-   link, organizer, attendees with their replies, `calendarColor`, description as `notesHTML`). If `meeting/event_id`
-   is unset this is an ad-hoc event: use `general`, say so in the hero, and skip the guest section.
-2. Gather context from what this session can reach. Run `work42 widget list`: any other widget the user enabled for
-   this session (an issue board, pull requests, docs) has a skill that explains how to read it; use those sources, and
-   do not assume which plugins exist. Skip a source whose tool is missing or signed out and say what you skipped in the
-   footer. For a 1:1 or external call, also look for the earlier summary of the same meeting and the last emails with
+1. Read the event: `meet42 show "$(work42 storage get meeting/event_id | tr -d '"')" --json` (title, time, location,
+   meeting link, organizer, attendees with their replies, `calendarColor`, description as `notesHTML`). Storage values
+   print as JSON, so a string comes back in quotes; `tr -d '"'` strips them, and without it `meet42 show` finds no event.
+   If `meeting/event_id` is unset this is an ad-hoc event: use `general`, say so in the hero, and skip the guest section.
+2. Gather context from the session's data sources **before you write anything**. Run `work42 widget list`: every
+   widget in it other than the meeting's own (chat, recording, brief, event details, summary, permissions, annotations)
+   is a data source, **whether it is open or closed** (an issue board, pull requests, docs). For each one, load its skill
+   and run the commands it names (a CLI such as an issue tracker or a code host) to find the items that relate to this
+   meeting. A source is unavailable only when those commands fail: an MCP connector that is not authorized is not a
+   reason to skip a source whose CLI works. Do not assume which plugins exist. Say in the footer which sources you read
+   and which failed. For a 1:1 or external call, also look for the earlier summary of the same meeting and the last emails with
    those people if a connector offers them.
 3. Build the artifact from the template. `D` is the folder this SKILL.md is in:
    ```bash
