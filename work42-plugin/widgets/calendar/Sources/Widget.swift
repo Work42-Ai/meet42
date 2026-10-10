@@ -1056,6 +1056,12 @@ struct ClickAnchor: View {
 
 // MARK: - Popover content (calendar-event + per-event assist picker)
 
+/// The measured height of the popup's content, so its scroll area can be as tall as the content needs.
+private struct CalPopupContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 /// Loads one event in full for the popup; set by `CalendarRootView` from the store's services.
 private struct CalEventLoaderKey: EnvironmentKey {
     static let defaultValue: @MainActor (String) async -> MeetEventState = { _ in .unlinked }
@@ -1090,6 +1096,7 @@ struct EventDetailPopover: View {
     @Environment(\.calSessionCancel) private var cancelScheduled
 
     @State private var event: MeetEvent?
+    @State private var contentHeight: CGFloat = 0
     @State private var sessionId: String?
     @State private var creating = false
     @State private var createError: String?
@@ -1099,12 +1106,18 @@ struct EventDetailPopover: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // A ScrollView in a popover collapses to a small default height, so a plain maxHeight never made it
+            // taller. Measure the content and size the scroll area to it, up to 640 points.
             ScrollView(.vertical, showsIndicators: true) {
                 content
                     .padding(DT.s16)
                     .frame(width: 440, alignment: .leading)
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(key: CalPopupContentHeightKey.self, value: proxy.size.height)
+                    })
             }
-            .frame(minHeight: 280, maxHeight: 680)
+            .onPreferenceChange(CalPopupContentHeightKey.self) { contentHeight = $0 }
+            .frame(height: min(max(contentHeight, 240), 640))
             Divider().opacity(0.5)
             buttonRow
         }
