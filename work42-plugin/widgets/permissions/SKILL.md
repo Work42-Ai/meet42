@@ -29,6 +29,9 @@ again, so a switch flipped in System Settings shows up on its own.
 When the `meet42` tool is not installed the tile says so. Ask the agent in any session to set meet42 up: it
 follows the `meet42-setup` skill, which installs the tool and then checks these permissions.
 
+The "meet42 needs setup" header label (from the Recording widget) links to this widget (`meet42://widget/permissions`),
+so clicking it reveals the permissions.
+
 ## Prerequisites
 
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
