@@ -1102,13 +1102,13 @@ struct EventDetailPopover: View {
             ScrollView(.vertical, showsIndicators: true) {
                 content
                     .padding(DT.s16)
-                    .frame(width: 380, alignment: .leading)
+                    .frame(width: 440, alignment: .leading)
             }
-            .frame(maxHeight: 440)
+            .frame(minHeight: 280, maxHeight: 680)
             Divider().opacity(0.5)
             buttonRow
         }
-        .frame(width: 380)
+        .frame(width: 440)
         .task(id: item.id) {
             sessionId = item.sessionId
             if case .loaded(let loaded) = await loadEvent(item.id) {
@@ -1269,22 +1269,36 @@ struct EventDetailPopover: View {
     // MARK: Button row (pinned)
 
     private var buttonRow: some View {
-        HStack(spacing: DT.s8) {
-            if let link, let url = URL(string: link) {
-                Button {
-                    NSWorkspace.shared.open(url)
-                } label: {
-                    Label("Join meeting", systemImage: "video.fill")
+        VStack(alignment: .leading, spacing: DT.s8) {
+            HStack(spacing: DT.s8) {
+                if let link, let url = URL(string: link) {
+                    Button {
+                        NSWorkspace.shared.open(url)
+                    } label: {
+                        Label("Join meeting", systemImage: "video.fill").lineLimit(1).fixedSize()
+                    }
+                    .glassProminentCapsule(tint: MeetProvider.detect(link)?.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
+                    .help(link)
                 }
-                .glassProminentCapsule(tint: MeetProvider.detect(link)?.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
-                .help(link)
+                Spacer(minLength: 0)
+                aiControl
             }
-            Spacer(minLength: 0)
-            aiControl
+            if let caption = aiCaption {
+                Text(caption).font(.system(size: DT.f11)).foregroundStyle(.secondary)
+            }
+            if let createError {
+                Text(createError).font(.system(size: DT.f11)).foregroundStyle(DT.red)
+            }
         }
         .padding(.horizontal, DT.s12)
-        .padding(.vertical, DT.s8)
+        .padding(.vertical, DT.s12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial)
+    }
+
+    /// Under the buttons: when the automatic session will be created, for an AI-assisted event without one yet.
+    private var aiCaption: String? {
+        mode == .assisted && sessionId == nil ? "A session is created automatically at \(autoTime)." : nil
     }
 
     @ViewBuilder
@@ -1295,29 +1309,21 @@ struct EventDetailPopover: View {
                 Button {
                     if let url = URL(string: "work42://session/\(sessionId)") { NSWorkspace.shared.open(url) }
                 } label: {
-                    Label("Open session in Work42", systemImage: "arrow.up.forward.app")
+                    Label("Open session in Work42", systemImage: "arrow.up.forward.app").lineLimit(1).fixedSize()
                 }
                 .glassProminentCapsule(tint: DT.systemAccent)
             } else {
-                VStack(alignment: .trailing, spacing: 2) {
-                    HStack(spacing: DT.s8) {
-                        Text("Auto at \(autoTime)").font(.system(size: DT.f11)).foregroundStyle(.secondary)
-                        Button {
-                            Task { await createSession() }
-                        } label: {
-                            Label(creating ? "Creating\u{2026}" : "Create session now", systemImage: "sparkles")
-                        }
-                        .glassProminentCapsule(tint: DT.systemAccent)
-                        .disabled(creating)
-                    }
-                    if let createError {
-                        Text(createError).font(.system(size: DT.f10)).foregroundStyle(DT.red)
-                    }
+                Button {
+                    Task { await createSession() }
+                } label: {
+                    Label(creating ? "Creating\u{2026}" : "Create session now", systemImage: "sparkles").lineLimit(1).fixedSize()
                 }
+                .glassProminentCapsule(tint: DT.systemAccent)
+                .disabled(creating)
             }
         case .viewOnly:
             Button(action: onEnableAssistance) {
-                Label("Enable AI assistance", systemImage: "sparkles")
+                Label("Enable AI assistance", systemImage: "sparkles").lineLimit(1).fixedSize()
             }
             .glassPlainCapsule()
             .help("Opt this single event into AI assistance. The rest of the calendar stays view-only.")
