@@ -854,6 +854,43 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
     }
 }
 
+// MARK: - Microphone list cache
+
+/// The host draws the action-area mic menu once and reads its options at that moment, so a list that arrives a
+/// moment later (it comes from the `meet42 mics` CLI) would never show. The widget therefore keeps the last
+/// device list on disk and the menu reads it synchronously, together with the saved selection, every time it is
+/// asked. The CLI call only refreshes the file.
+private enum MicCache {
+    private static var directory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/meet42")
+    }
+
+    static func write(_ rows: [[String: Any]]) {
+        let devices = rows.compactMap { row -> [String: String]? in
+            guard let uid = row["uid"] as? String, let name = row["name"] as? String else { return nil }
+            return ["uid": uid, "name": name]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: devices) else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? data.write(to: directory.appendingPathComponent("mics-cache.json"), options: .atomic)
+    }
+
+    /// The cached devices with the saved selection marked (`mic-input-device.json`, written by `meet42 mics select`).
+    static func options() -> [WidgetIntentMenuOption] {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("mics-cache.json")),
+              let devices = (try? JSONSerialization.jsonObject(with: data)) as? [[String: String]] else { return [] }
+        let selected: String? = {
+            guard let data = try? Data(contentsOf: directory.appendingPathComponent("mic-input-device.json")),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+            return object["uid"] as? String
+        }()
+        return devices.compactMap { device in
+            guard let uid = device["uid"], let name = device["name"] else { return nil }
+            return WidgetIntentMenuOption(id: uid, title: name, icon: "mic", isSelected: uid == selected)
+        }
+    }
+}
+
 // MARK: - RecordingWidget
 
 @Observable
@@ -886,6 +923,9 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
     /// Id of the placeholder row shown when this Mac has no input device (selecting it does nothing).
     private static let noMicrophoneID = "meet42.no-microphone"
 
+    /// The last device count written to the trace, so the 2-second poll logs only changes.
+    @ObservationIgnored private var lastLoggedMicCount = -1
+
     /// Active session services — set in `activate`, cleared in `deactivate`.
     @ObservationIgnored private var services: SessionServices? = nil
 
@@ -909,8 +949,14 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                 icon: "mic",
                 placement: [.actionArea],
                 actionAreaStyle: .menu(
-                    options: { [weak self] in self?.micOptions ?? [] },
+                    options: { [weak self] in
+                        // The cache carries the saved selection live; the in-memory list is the fallback.
+                        let cached = MicCache.options()
+                        let options = cached.isEmpty ? (self?.micOptions ?? []) : cached
+                        return options
+                    },
                     onSelect: { [weak self] uid in
+                        Meet42Trace.log("recording", "mic-selected", ["uid": uid])
                         guard let self, let svc = self.services, uid != Self.noMicrophoneID else { return }
                         _ = try? await svc.shell.run(
                             command: "meet42 mics select \"\(uid)\""
@@ -1069,11 +1115,28 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
     /// Shell `meet42 mics --json` and refresh the cached `micOptions` list.
     private func refreshMicOptions() async {
         guard let svc = services else { return }
-        guard let result = try? await svc.shell.run(command: "meet42 mics --json"),
-              result.exitCode == 0 else { return }
+        guard let result = try? await svc.shell.run(command: "meet42 mics --json") else {
+            Meet42Trace.log("recording", "mics-shell-failed", [:])
+            return
+        }
+        guard result.exitCode == 0 else {
+            Meet42Trace.log("recording", "mics-exit-nonzero", [
+                "exit": String(result.exitCode),
+                "stderr": String(result.stderr.prefix(200)),
+            ])
+            return
+        }
         guard let data = result.stdout.data(using: .utf8),
               let rows = try? JSONSerialization.jsonObject(with: data)
-                  as? [[String: Any]] else { return }
+                  as? [[String: Any]] else {
+            Meet42Trace.log("recording", "mics-unparseable", ["stdout": String(result.stdout.prefix(200))])
+            return
+        }
+        MicCache.write(rows)
+        if rows.count != lastLoggedMicCount {
+            lastLoggedMicCount = rows.count
+            Meet42Trace.log("recording", "mics-loaded", ["count": String(rows.count)])
+        }
         if rows.isEmpty {
             micOptions = [WidgetIntentMenuOption(
                 id: Self.noMicrophoneID, title: "No microphone found", icon: "mic.slash", isSelected: false
