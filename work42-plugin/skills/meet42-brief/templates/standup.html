@@ -1,0 +1,19 @@
+<!-- meet42 brief template, standup. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. Sections: hero (lead = what changed since the last standup), counts, Blockers (first, drop if none), By person (one m-person card per attendee: Done / In progress / Blocked / Waiting on review, each item a link to its issue or PR). Use only what Linear, GitHub or the session's other widgets really show; an attendee with nothing in the window gets a one-line 'nothing since yesterday' or no card. -->
+<div class="m" style="--acc:#2563eb">
+<header class="m-hero">
+  <div class="m-eyebrow">Standup brief <span>· prepared 9:12 AM</span></div>
+  <div class="m-top"><h1 class="m-title">Platform daily</h1><a class="m-join" href="https://meet.google.com/abc">Join</a></div>
+  <div class="m-meta"><span class="m-chip">Today · 9:30 – 9:45 AM</span><span class="m-chip">5 people · Lena out</span><span class="m-chip">Since yesterday 9:30</span></div>
+  <div class="m-lead"><small>Since yesterday</small><b>6 issues moved and 2 PRs merged.</b> One blocker: SSO is still waiting on the security review.</div>
+</header>
+<div class="m-stats"><div class="m-stat ok"><b>4</b><span>issues done</span></div><div class="m-stat acc"><b>2</b><span>PRs merged</span></div><div class="m-stat"><b>3</b><span>PRs waiting for review</span></div><div class="m-stat bad"><b>1</b><span>blocker</span></div></div>
+<section><div class="m-h"><h3>Blockers</h3><span>Raise these first</span></div>
+  <div class="m-card"><div class="m-row"><span class="m-ic bad">!</span><div class="m-grow"><b>SSO can't start</b> until the security review is scheduled<div class="m-sub">Marcus · <a href="https://example.com/WOR-98">WOR-98</a> blocked for 4 days</div></div><span class="m-st st-bad">Blocked</span></div></div></section>
+<section><div class="m-h"><h3>By person</h3><span>From Linear and GitHub since the last standup</span></div>
+  <div class="m-grid">
+    <div class="m-person"><div class="m-pn"><span class="m-av g2">PR</span>Priya Raman</div><div class="m-lbl">Done</div><ul class="m-ul"><li class="ok">Merged <a href="https://example.com/pr/450">#450 Sync v2 spike</a></li><li class="ok"><a href="https://example.com/WOR-120">WOR-120</a> → Done</li></ul><div class="m-lbl">In progress</div><ul class="m-ul"><li><a href="https://example.com/WOR-112">WOR-112</a> Conflict resolution</li></ul></div>
+    <div class="m-person"><div class="m-pn"><span class="m-av g1">ML</span>Marcus Lee</div><div class="m-lbl">Done</div><ul class="m-ul"><li class="ok">Reviewed <a href="https://example.com/pr/441">#441</a></li></ul><div class="m-lbl">Blocked</div><ul class="m-ul"><li class="bad"><a href="https://example.com/WOR-98">WOR-98</a> Enterprise SSO</li></ul></div>
+    <div class="m-person"><div class="m-pn"><span class="m-av g0">AS</span>Ana Silva</div><div class="m-lbl">Done</div><ul class="m-ul"><li class="ok">Merged <a href="https://example.com/pr/441">#441 Onboarding v2</a></li></ul><div class="m-lbl">Waiting on review</div><ul class="m-ul"><li class="warn"><a href="https://example.com/pr/455">#455</a> Billing emails · 2 days</li></ul></div>
+    <div class="m-person"><div class="m-pn"><span class="m-av g4">YR</span>Yan Rodriguez <span class="m-tag n">You</span></div><div class="m-lbl">Done</div><ul class="m-ul"><li class="ok"><a href="https://example.com/WOR-65">WOR-65</a> → In review</li></ul><div class="m-lbl">Next</div><ul class="m-ul"><li><a href="https://example.com/WOR-96">WOR-96</a> Meeting templates</li></ul></div>
+  </div></section>
+</div>

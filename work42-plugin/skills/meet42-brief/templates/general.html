@@ -1,0 +1,84 @@
+<!-- meet42 brief template, general. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. See the section comments below. -->
+<div class="m" style="--acc:#2563eb">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="m-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="m-video" viewBox="0 0 16 16"><rect x="1.5" y="4" width="9" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 7l4-2.2v6.4l-4-2.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></symbol>
+  <symbol id="m-pin" viewBox="0 0 16 16"><path d="M8 14.5s5-4.4 5-8.2A5 5 0 0 0 3 6.3c0 3.8 5 8.2 5 8.2z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="6.3" r="1.7" fill="currentColor"/></symbol>
+  <symbol id="m-people" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1.8 13.5c.4-2.4 2.1-3.8 4.2-3.8s3.8 1.4 4.2 3.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="11.6" cy="6" r="1.9" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+</svg>
+
+<!-- 1. HERO: the calendar colour is --acc on the wrapper; title; Join (only when there is a meeting link); chips for time, provider, place, guests; and the goal in one or two sentences inferred from the invite and the context you found. If the invite gives no goal, say so. -->
+<header class="m-hero">
+  <div class="m-eyebrow">Meeting brief <span>· prepared 1:48 PM</span></div>
+  <div class="m-top">
+    <h1 class="m-title">Q4 roadmap review</h1>
+    <a class="m-join" href="https://meet.google.com/qzr-hwpd-xk"><svg><use href="#m-video"/></svg>Join</a>
+  </div>
+  <div class="m-meta">
+    <span class="m-chip"><svg><use href="#m-clock"/></svg>Thu, Oct 16 · 2:00 – 2:45 PM</span>
+    <span class="m-chip"><svg><use href="#m-video"/></svg>Google Meet</span>
+    <span class="m-chip"><svg><use href="#m-pin"/></svg>Room 4B · Lisbon</span>
+    <span class="m-chip"><svg><use href="#m-people"/></svg>6 guests · organized by Ana</span>
+  </div>
+  <div class="m-lead"><small>The goal</small>Agree on the <b>top three Q4 bets</b> and leave with <b>an owner for each</b>. Sync v2 still has no owner, and SSO is waiting on a security review.</div>
+</header>
+
+<!-- 2. AT A GLANCE: three or four numbers that matter. Add class warn to a tile when something needs attention. Drop tiles you can't back with real data. -->
+<div class="m-stats">
+  <div class="m-stat"><b>4 of 6</b><span>going · 1 maybe, 1 no reply</span></div>
+  <div class="m-stat warn"><b>2</b><span>decisions needed</span></div>
+  <div class="m-stat"><b>4</b><span>linked items from your sources</span></div>
+  <div class="m-stat"><b>45 min</b><span>3 agenda blocks</span></div>
+</div>
+
+<!-- 3. DECISIONS NEEDED: what this meeting has to settle, each with its context and a link. Drop the section when nothing is waiting on a decision. -->
+<section>
+  <div class="m-h"><h3>Decisions needed</h3><span>What this meeting has to settle</span></div>
+  <div class="m-decs">
+    <div class="m-q"><span class="m-n">1</span><div><b>Who owns sync v2?</b><span>In progress for 3 weeks with no owner; Priya touched it last. <a href="https://example.com/WOR-112">WOR-112</a></span></div></div>
+    <div class="m-q"><span class="m-n">2</span><div><b>Start SSO before or after the security review?</b><span>Marcus estimates two weeks for the review. <a href="https://example.com/WOR-98">WOR-98</a></span></div></div>
+  </div>
+</section>
+
+<!-- 4. WHO'S COMING: one card per guest with avatar, name, role tag, reply (yes, maybe, or no class on m-rsvp) and the one thing worth knowing, with a link. Avatar colour: g0 to g5 by the rule in the skill. -->
+<section>
+  <div class="m-h"><h3>Who's coming</h3><span>What each person cares about today</span></div>
+  <div class="m-grid">
+    <div class="m-pcard"><span class="m-av g0">AS</span><div class="m-grow"><div class="m-pn" style="margin:0">Ana Silva <span class="m-tag">Organizer</span><span class="m-rsvp yes"><i></i>Going</span></div><div class="m-sub" style="margin-top:2px">Wrote the <a href="https://example.com/q4-plan">Q4 planning doc</a>; wants owners locked today.</div></div></div>
+    <div class="m-pcard"><span class="m-av g1">ML</span><div class="m-grow"><div class="m-pn" style="margin:0">Marcus Lee <span class="m-rsvp yes"><i></i>Going</span></div><div class="m-sub" style="margin-top:2px">Owns security reviews; <a href="https://example.com/WOR-98">WOR-98</a> is blocked on him.</div></div></div>
+    <div class="m-pcard"><span class="m-av g2">PR</span><div class="m-grow"><div class="m-pn" style="margin:0">Priya Raman <span class="m-rsvp yes"><i></i>Going</span></div><div class="m-sub" style="margin-top:2px">Last to touch sync v2 (<a href="https://example.com/pr/450">PR #450</a>).</div></div></div>
+    <div class="m-pcard"><span class="m-av g3">TB</span><div class="m-grow"><div class="m-pn" style="margin:0">Tom Becker <span class="m-tag n">Partner</span><span class="m-rsvp maybe"><i></i>Maybe</span></div><div class="m-sub" style="margin-top:2px">Asked about the partner API in <a href="https://example.com/slack">#partners</a>.</div></div></div>
+  </div>
+</section>
+
+<!-- 5. FROM YOUR SOURCES: one m-src card per source the session's widgets offer (Linear, GitHub, docs, ...); every item is a direct link with its key, why it matters, and a state pill (st-ok, st-warn, st-bad or st-n). Skip a source that was unavailable and say so in the footer. -->
+<section>
+  <div class="m-h"><h3>From your sources</h3><span>Linked items related to this meeting</span></div>
+  <div class="m-src">
+    <div class="m-src-h"><span class="m-logo" style="background:#5e6ad2">L</span>Linear</div>
+    <div class="m-item"><span class="m-key">WOR-112</span><div class="m-grow"><a href="https://example.com/WOR-112">Sync v2: conflict resolution</a><span class="m-why">Decision 1 · no owner for 3 weeks</span></div><span class="m-st st-warn">In progress</span></div>
+    <div class="m-item"><span class="m-key">WOR-98</span><div class="m-grow"><a href="https://example.com/WOR-98">Enterprise SSO (SAML)</a><span class="m-why">Decision 2 · waiting on the security review</span></div><span class="m-st st-bad">Blocked</span></div>
+  </div>
+  <div class="m-src">
+    <div class="m-src-h"><span class="m-logo" style="background:#1f2328">GH</span>GitHub</div>
+    <div class="m-item"><span class="m-key">#441</span><div class="m-grow"><a href="https://example.com/pr/441">Onboarding checklist v2</a><span class="m-why">Ready to ship; candidate Q4 bet</span></div><span class="m-st st-ok">Approved</span></div>
+    <div class="m-item"><span class="m-key">#450</span><div class="m-grow"><a href="https://example.com/pr/450">Sync v2 spike</a><span class="m-why">Priya's prototype</span></div><span class="m-st st-n">Draft</span></div>
+  </div>
+</section>
+
+<!-- 6. SUGGESTED AGENDA: a short timeline with clock times and durations that add up to the meeting length, then questions to ask, each addressed to a person (with their avatar). -->
+<section>
+  <div class="m-h"><h3>Suggested agenda</h3><span>45 minutes</span></div>
+  <div class="m-agenda">
+    <div class="m-step"><span class="m-time">2:00</span><span class="m-dot"></span><div><b>Q3 recap</b><div class="m-sub">What shipped, what slipped</div></div><span class="m-dur">5 min</span></div>
+    <div class="m-step"><span class="m-time">2:05</span><span class="m-dot"></span><div><b>Pick the three bets</b><div class="m-sub">Onboarding v2, sync v2, SSO are the front-runners</div></div><span class="m-dur">25 min</span></div>
+    <div class="m-step"><span class="m-time">2:30</span><span class="m-dot"></span><div><b>Owners and dates</b><div class="m-sub">Settle decisions 1 and 2</div></div><span class="m-dur">15 min</span></div>
+  </div>
+  <div class="m-asks">
+    <div class="m-ask"><span class="m-av sm g3">TB</span><div><b>Ask Tom</b> what the partner API timeline is.</div></div>
+    <div class="m-ask"><span class="m-av sm g1">ML</span><div><b>Ask Marcus</b> whether the review can start this week.</div></div>
+  </div>
+</section>
+
+<div class="m-foot">Prepared by the agent from the invite, Linear and GitHub · ask in chat to update it</div>
+</div>

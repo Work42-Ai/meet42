@@ -1,0 +1,81 @@
+<!-- meet42 summary template, general. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. See the section comments below. -->
+<div class="m" style="--acc:#2563eb">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="m-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="m-mic" viewBox="0 0 16 16"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 8a5 5 0 0 0 10 0M8 13v1.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="m-people" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1.8 13.5c.4-2.4 2.1-3.8 4.2-3.8s3.8 1.4 4.2 3.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="11.6" cy="6" r="1.9" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+</svg>
+
+<!-- 1. HERO: title, when it ran and for how long, avatars of who was there (m-stack, up to 5), chips (recorded minutes, who spoke and who was absent), and the TL;DR in two sentences. Keep --glow green on the hero. -->
+<header class="m-hero" style="--glow:var(--w42-green)">
+  <div class="m-eyebrow">Meeting summary <span>· written 2:41 PM</span></div>
+  <div class="m-top">
+    <h1 class="m-title">Q4 roadmap review</h1>
+    <div class="m-stack"><span class="m-av g0">AS</span><span class="m-av g1">ML</span><span class="m-av g2">PR</span><span class="m-av g4">YR</span></div>
+  </div>
+  <div class="m-meta">
+    <span class="m-chip"><svg><use href="#m-clock"/></svg>Thu, Oct 16 · 2:00 – 2:38 PM</span>
+    <span class="m-chip"><svg><use href="#m-mic"/></svg>38 min recorded</span>
+    <span class="m-chip"><svg><use href="#m-people"/></svg>4 of 6 spoke · Tom and Lena absent</span>
+  </div>
+  <div class="m-lead"><small>TL;DR</small>The Q4 bets are <b>onboarding v2, sync v2 and SSO</b>. Sync v2 ships first without offline mode; <b>SSO waits for the security review</b>, about two weeks out.</div>
+</header>
+
+<!-- 2. AT A GLANCE: decisions made (ok), action items (acc, N is the number you write to meeting/summary), open questions (warn). -->
+<div class="m-stats">
+  <div class="m-stat ok"><b>2</b><span>decisions made</span></div>
+  <div class="m-stat acc"><b>3</b><span>action items · 3 owners</span></div>
+  <div class="m-stat warn"><b>1</b><span>open question</span></div>
+</div>
+
+<!-- 3. ACTION ITEMS: the most useful part, so it comes first. Each is something to do, with a link when it maps to an issue or PR (m-link), the owner's avatar and name, and a due date when one was said (m-due, add soon when it is within a week). Say "No date" rather than inventing one. -->
+<section>
+  <div class="m-h"><h3>Action items</h3><span>Owner and due date as said in the meeting</span></div>
+  <div class="m-card">
+    <div class="m-row"><span class="m-box"></span><div class="m-grow"><b>Scope sync v2</b> without offline mode and take ownership<a class="m-link" href="https://example.com/WOR-112">WOR-112</a></div><span class="m-own"><span class="m-av sm g2">PR</span>Priya<span class="m-due">Oct 23</span></span></div>
+    <div class="m-row"><span class="m-box"></span><div class="m-grow"><b>Schedule the security review</b> for SSO<a class="m-link" href="https://example.com/WOR-98">WOR-98</a></div><span class="m-own"><span class="m-av sm g1">ML</span>Marcus<span class="m-due soon">This week</span></span></div>
+    <div class="m-row"><span class="m-box"></span><div class="m-grow"><b>Update the Q4 planning doc</b> with the three bets<a class="m-link" href="https://example.com/q4-plan">Doc</a></div><span class="m-own"><span class="m-av sm g0">AS</span>Ana<span class="m-due">No date</span></span></div>
+  </div>
+</section>
+
+<!-- 4. DECISIONS and OPEN QUESTIONS side by side (they stack on a narrow pane). Each decision says who proposed or agreed and its recording time (m-ts, mm:ss from audioStartSeconds in conversation.jsonl). -->
+<div class="m-cols">
+  <section>
+    <div class="m-h"><h3>Decisions</h3></div>
+    <div class="m-card">
+      <div class="m-row"><span class="m-ic ok">✓</span><div class="m-grow">Sync v2 ships first, <b>without offline mode</b><div class="m-sub">Proposed by Priya, agreed by Ana <span class="m-ts">14:20</span></div></div></div>
+      <div class="m-row"><span class="m-ic ok">✓</span><div class="m-grow">SSO starts <b>after</b> the security review<div class="m-sub">About two weeks, per Marcus <span class="m-ts">22:05</span></div></div></div>
+    </div>
+  </section>
+  <section>
+    <div class="m-h"><h3>Open questions</h3></div>
+    <div class="m-card">
+      <div class="m-row"><span class="m-ic q">?</span><div class="m-grow">What is the partner API timeline?<div class="m-sub">Tom wasn't there; follow up in <a href="https://example.com/slack">#partners</a></div></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- 5. KEY MOMENTS: three to six turning points, each with its transcript time (mm:ss). Drop when the meeting had no clear turning points. -->
+<section>
+  <div class="m-h"><h3>Key moments</h3><span>Times are from the recording</span></div>
+  <div class="m-card">
+    <div class="m-mo"><span class="m-ts">03:12</span><div><b>Q3 recap:</b> onboarding v1 shipped; sync slipped a month.</div></div>
+    <div class="m-mo"><span class="m-ts">14:20</span><div><b>Sync v2 scope cut</b> to unblock a Q4 launch.</div></div>
+    <div class="m-mo"><span class="m-ts">22:05</span><div><b>SSO timing</b> tied to the security review.</div></div>
+    <div class="m-mo"><span class="m-ts">31:40</span><div><b>Owners assigned</b> for all three bets.</div></div>
+  </div>
+</section>
+
+<!-- 6. RESOURCES MENTIONED: every resource anyone named, as a direct link chip with its source mark (a coloured m-logo). -->
+<section>
+  <div class="m-h"><h3>Resources mentioned</h3></div>
+  <div class="m-res">
+    <a class="m-r" href="https://example.com/q4-plan"><span class="m-logo" style="background:#2563eb">D</span>Q4 planning doc</a>
+    <a class="m-r" href="https://example.com/WOR-112"><span class="m-logo" style="background:#5e6ad2">L</span>WOR-112 Sync v2</a>
+    <a class="m-r" href="https://example.com/WOR-98"><span class="m-logo" style="background:#5e6ad2">L</span>WOR-98 Enterprise SSO</a>
+    <a class="m-r" href="https://example.com/pr/441"><span class="m-logo" style="background:#1f2328">GH</span>#441 Onboarding checklist v2</a>
+  </div>
+</section>
+
+<div class="m-foot">Written by the agent from the transcript, the event and the brief · ask in chat to change it</div>
+</div>
