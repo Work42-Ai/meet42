@@ -1,20 +1,31 @@
 ---
 name: widget-event-details
 description: |
-  How the Event Details widget (session tab kindId widget:event-details) works
-  on a meet42 meeting session. It renders the calendar event the session was
-  minted around — title, time, RSVP/status, location, organizer, attendees,
-  notes — from the session's meeting.json snapshot.
+  How the Event details widget (session tab kindId widget:event-details) works on a meet42
+  meeting session: the calendar event read live through meet42, the header time label, and
+  the Join action.
 ---
 
-# Event Details widget
+# Event details widget
 
-Renders a meeting session's event detail from the `meeting.json` snapshot that
-meet42 writes (and rewrites on each calendar sync) next to the session. Shows
-title, time range, the user's RSVP + the meeting's status, location, organizer,
-the attendee list (with per-attendee RSVP dots, organizer/you chips), notes,
-and a "synced Ns ago" footer. A "Join meeting" link appears when the snapshot
-carries a meeting URL. Empty until the snapshot exists.
+Shows the session's calendar event. The session stores only the event id (`meeting/event_id`); the widget runs
+`meet42 show <event_id> --json` on appear and every 60 seconds, so it reflects edits made in the calendar. The same
+command is the agent's source for the event: there is no `meeting.json`.
+
+**Card:** the calendar's colour bar, a source chip ("Google · Work") and a status chip, the title, the absolute date
+and time (all-day aware), the meeting link with its provider (Google Meet, Zoom, Microsoft Teams, Webex, otherwise the
+host) and a copy button, the location (hidden when it is the meeting link), a guests summary with an RSVP bar, and the
+description (the event notes as sanitised HTML, rendered by the SDK markdown viewer, collapsed behind **Show more**).
+
+**Not linked:** an event session created without a calendar event shows "Not linked to a calendar event". If `meet42`
+is missing or `show` fails, the widget shows the error and the command that failed.
+
+**Header label (every tab):** "Starts in N min" from 60 minutes before the start, "Live · N min left" during the
+meeting, "Ended h:mm" afterwards. It opens this widget (`meet42://widget/event-details`).
+
+**Action:** **Join**, in the provider's brand colour, from 15 minutes before the start until the end, for an event
+with a meeting link. It opens the link with the operating system (the Zoom or Teams app when installed, otherwise the
+default browser), never inside Work42. It shows on the tab where this widget is.
 
 ## Prerequisites
 

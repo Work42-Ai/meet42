@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)/work42-plugin"
 # "<shared file>:<widget> <widget> …"
 MAP=(
   "PinnedArtifact.swift:brief summary"
+  "MeetEvent.swift:event-details people recording"
 )
 
 status=0
