@@ -439,6 +439,21 @@ private struct RecordingRecordStartResult: Decodable {
     let dir: String
 }
 
+/// `meet42 record start` prints ONE stdout line once capture has really started or failed. A failure is
+/// `{"started":false,"reason":"system_audio_denied","message":"…"}`.
+private struct RecordingRecordStartFailure: Decodable {
+    let started: Bool
+    let reason: String
+    let message: String?
+}
+
+private enum RecordingStartOutcome {
+    case started(RecordingRecordStartResult)
+    case failed(reason: String, message: String)
+    /// Nothing came back (the tool is missing or did not answer).
+    case unavailable
+}
+
 /// Launch `meet42 record start --manual` as a DETACHED process — NOT via
 /// `WidgetShellService` (bounded to 10s; `record start` daemonizes via
 /// setsid+execve with no fork, so it never exits on its own while recording,
@@ -449,7 +464,7 @@ private struct RecordingRecordStartResult: Decodable {
 /// session's storage pointer — mirrors the calendar widget's
 /// `fireRecordStart`: redirect to a temp file and poll for the line to
 /// appear (NOT for the process to exit, since it deliberately never does).
-private func fireRecordingRecordStart() async -> RecordingRecordStartResult? {
+private func fireRecordingRecordStart() async -> RecordingStartOutcome {
     let (exe, args) = recordingMeet42Invocation(
         verb: "record", extraArgs: ["start", "--manual", "--json"]
     )
@@ -457,7 +472,7 @@ private func fireRecordingRecordStart() async -> RecordingRecordStartResult? {
         .appendingPathComponent("meet42-record-\(UUID().uuidString).json")
     guard FileManager.default.createFile(atPath: outURL.path, contents: nil),
           let outHandle = try? FileHandle(forWritingTo: outURL)
-    else { return nil }
+    else { return .unavailable }
     defer {
         try? outHandle.close()
         try? FileManager.default.removeItem(at: outURL)
@@ -471,22 +486,31 @@ private func fireRecordingRecordStart() async -> RecordingRecordStartResult? {
     do {
         try process.run()
     } catch {
-        return nil
+        return .unavailable
     }
 
-    // Poll for the stdout line to appear — it prints well under 1s after
-    // launch (before the slow capture init); 5s total budget leaves
-    // generous headroom. If the singleton is already held elsewhere, the
-    // daemon prints a refusal payload instead, which fails to decode as
-    // RecordingRecordStartResult — correctly surfacing as "didn't start."
-    for _ in 0..<50 {
-        if let data = try? Data(contentsOf: outURL), !data.isEmpty,
-           let result = try? JSONDecoder().decode(RecordingRecordStartResult.self, from: data) {
-            return result
+    // The line appears once capture has started or failed. That can take a while: the first Record shows
+    // macOS's permission prompt and waits for the answer, so allow a minute.
+    for _ in 0..<240 {
+        if let data = try? Data(contentsOf: outURL), !data.isEmpty {
+            if let result = try? JSONDecoder().decode(RecordingRecordStartResult.self, from: data) {
+                return .started(result)
+            }
+            if let failure = try? JSONDecoder().decode(RecordingRecordStartFailure.self, from: data) {
+                return .failed(reason: failure.reason, message: failure.message ?? "Recording could not start.")
+            }
+            // A refusal payload (another recording holds the slot) carries a reason but no message.
+            if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let reason = object["reason"] as? String {
+                return .failed(reason: reason, message: "Another recording is already running.")
+            }
         }
-        try? await Task.sleep(for: .milliseconds(100))
+        if !process.isRunning, (try? Data(contentsOf: outURL))?.isEmpty ?? true {
+            return .failed(reason: "capture_failed", message: "meet42 stopped before recording started.")
+        }
+        try? await Task.sleep(for: .milliseconds(250))
     }
-    return nil
+    return .unavailable
 }
 
 // MARK: - Active meeting ownership
@@ -859,6 +883,9 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
     /// which is synchronous and reads this cached value.
     private(set) var micOptions: [WidgetIntentMenuOption] = []
 
+    /// Id of the placeholder row shown when this Mac has no input device (selecting it does nothing).
+    private static let noMicrophoneID = "meet42.no-microphone"
+
     /// Active session services — set in `activate`, cleared in `deactivate`.
     @ObservationIgnored private var services: SessionServices? = nil
 
@@ -884,7 +911,7 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                 actionAreaStyle: .menu(
                     options: { [weak self] in self?.micOptions ?? [] },
                     onSelect: { [weak self] uid in
-                        guard let self, let svc = self.services else { return }
+                        guard let self, let svc = self.services, uid != Self.noMicrophoneID else { return }
                         _ = try? await svc.shell.run(
                             command: "meet42 mics select \"\(uid)\""
                         )
@@ -914,10 +941,21 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                 isEnabled: { [weak self] in !(self?.isRecordingThisSession ?? false) },
                 perform: { [weak self] in
                     guard let self, let svc = self.services, let sessionId = svc.sessionId else { return }
-                    guard let started = await fireRecordingRecordStart() else {
+                    let outcome = await fireRecordingRecordStart()
+                    guard case .started(let started) = outcome else {
                         Meet42Trace.log("recording", "manual-record-aborted", ["sessionId": sessionId])
+                        // Say why, in the tile: a permission that was turned off, a mic that went missing.
+                        var failure = WidgetJSONValue.object([
+                            "reason": .string("capture_failed"),
+                            "message": .string("meet42 didn\u{2019}t answer. Check that it is installed."),
+                        ])
+                        if case .failed(let reason, let message) = outcome {
+                            failure = .object(["reason": .string(reason), "message": .string(message)])
+                        }
+                        try? await svc.storage.set(key: "start_error", value: failure)
                         return
                     }
+                    try? await svc.storage.delete(key: "start_error")
                     Meet42Trace.log("recording", "manual-record-started",
                         ["sessionId": sessionId, "recordingId": started.recordingId])
 
@@ -1036,6 +1074,12 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
         guard let data = result.stdout.data(using: .utf8),
               let rows = try? JSONSerialization.jsonObject(with: data)
                   as? [[String: Any]] else { return }
+        if rows.isEmpty {
+            micOptions = [WidgetIntentMenuOption(
+                id: Self.noMicrophoneID, title: "No microphone found", icon: "mic.slash", isSelected: false
+            )]
+            return
+        }
         micOptions = rows.compactMap { row -> WidgetIntentMenuOption? in
             guard let uid  = row["uid"]  as? String,
                   let name = row["name"] as? String else { return nil }
@@ -1091,6 +1135,9 @@ private struct RecordingTileView: View {
     /// tile was already open" case, where it resolves once the pointer
     /// appears).
     @State private var recordingDir: String?
+    /// Why the last Record press did not start (`recording/start_error`), shown as a banner until a
+    /// recording does start. nil when there is nothing to report.
+    @State private var startError: (reason: String, message: String)?
 
     var body: some View {
         // Register both watchers as dependencies so the body re-runs on change.
@@ -1124,6 +1171,21 @@ private struct RecordingTileView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let startError { startErrorBanner(startError) }
+        }
+        .task {
+            // Keep the failure banner in step with the stored start error.
+            while !Task.isCancelled {
+                if case .object(let object)? = try? await services.storage.get(namespace: "recording", key: "start_error"),
+                   case .string(let reason)? = object["reason"], case .string(let message)? = object["message"] {
+                    startError = (reason, message)
+                } else {
+                    startError = nil
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         .task {
             // Poll until the pointer resolves, then stop — it's set once
             // and never changes for a session's lifetime, but it may not
@@ -1151,6 +1213,40 @@ private struct RecordingTileView: View {
             conversationWatcher.stop()
             speakersWatcher.stop()
         }
+    }
+
+    /// The permission page that fixes `reason`, or nil when the failure is not a permission one.
+    private func permissionToOpen(for reason: String) -> String? {
+        switch reason {
+        case "system_audio_denied": return "systemAudio"
+        case "microphone_denied": return "microphone"
+        default: return nil
+        }
+    }
+
+    private func startErrorBanner(_ error: (reason: String, message: String)) -> some View {
+        HStack(alignment: .top, spacing: DT.s8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DT.amber)
+            VStack(alignment: .leading, spacing: DT.s4) {
+                Text("Recording didn\u{2019}t start")
+                    .font(.system(size: DT.f12, weight: .semibold))
+                Text(error.message)
+                    .font(.system(size: DT.f11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let permission = permissionToOpen(for: error.reason) {
+                    Button("Open Settings") {
+                        Task { _ = try? await services.shell.run(command: "meet42 permissions open \(permission)") }
+                    }
+                    .glassSubtleCapsule(tint: DT.systemAccent)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(DT.s12)
+        .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
+        .padding(.horizontal, DT.s12)
+        .padding(.top, DT.s8)
     }
 
     @ViewBuilder

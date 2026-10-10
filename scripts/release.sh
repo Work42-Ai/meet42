@@ -8,7 +8,7 @@
 # The release is two assets, served from fixed URLs:
 #   https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip
 #   https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip.sha256
-# meet42.zip holds the single signed, notarized `meet42` executable.
+# meet42.zip holds the signed, notarized meet42.app (a small window-less app bundle; the CLI is its executable).
 #
 # Credentials come from the environment or an untracked .env.release.local (see .env.release.example):
 #   WORK42_DEVELOPER_ID_APPLICATION  a "Developer ID Application: …" identity in the login Keychain
@@ -103,18 +103,18 @@ out="dist/$version"
 rm -rf "$out"; mkdir -p "$out"
 
 echo "==> build + sign"
-bin="$(DEVELOPER_ID="$WORK42_DEVELOPER_ID_APPLICATION" scripts/build-meet42.sh | tail -n 1)"
-cp "$bin" "$out/meet42"
+app="$(DEVELOPER_ID="$WORK42_DEVELOPER_ID_APPLICATION" scripts/build-meet42.sh | tail -n 1)"
+ditto "$app" "$out/meet42.app"
 
 echo "==> verify signature"
-codesign --verify --strict --verbose=2 "$out/meet42"
-signature="$(codesign -dvv "$out/meet42" 2>&1)"
+codesign --verify --deep --strict --verbose=2 "$out/meet42.app"
+signature="$(codesign -dvv "$out/meet42.app" 2>&1)"
 grep -Fq "Identifier=com.work42.meet42" <<<"$signature" || die "signed with the wrong identifier"
 grep -Fq "Authority=Developer ID Application" <<<"$signature" || die "not signed with a Developer ID"
 grep -Fq "flags=0x10000(runtime)" <<<"$signature" || die "Hardened Runtime is not enabled"
 
 echo "==> package"
-ditto -c -k "$out/meet42" "$out/meet42.zip"
+(cd "$out" && ditto -c -k --keepParent meet42.app meet42.zip)
 
 echo "==> notarize (waits for Apple)"
 notary=()
@@ -123,14 +123,19 @@ submission="$(xcrun notarytool submit "$out/meet42.zip" "${notary[@]}" --wait 2>
 echo "$submission"
 grep -Eq "status: Accepted" <<<"$submission" || die "notarization was not accepted"
 
+echo "==> staple the ticket and repackage"
+xcrun stapler staple "$out/meet42.app"
+(cd "$out" && rm -f meet42.zip && ditto -c -k --keepParent meet42.app meet42.zip)
+
 echo "==> checksum"
 (cd "$out" && shasum -a 256 meet42.zip > meet42.zip.sha256 && shasum -a 256 -c meet42.zip.sha256)
 
-echo "==> check the packaged binary"
+echo "==> check the packaged app"
 check_dir="$(mktemp -d)"; trap 'rm -rf "$check_dir"' EXIT
 ditto -x -k "$out/meet42.zip" "$check_dir"
-codesign --verify --strict "$check_dir/meet42"
-"$check_dir/meet42" --version
+codesign --verify --deep --strict "$check_dir/meet42.app"
+spctl --assess --type execute --verbose=2 "$check_dir/meet42.app"
+"$check_dir/meet42.app/Contents/MacOS/meet42" --version
 
 echo
 echo "Candidate ready in $out/ (meet42.zip, meet42.zip.sha256)."

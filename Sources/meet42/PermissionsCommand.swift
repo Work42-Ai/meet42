@@ -1,8 +1,8 @@
 // PermissionsCommand.swift — `meet42 permissions`: see and grant the four privacy permissions meet42 needs.
 //
 //   meet42 permissions [--json]
-//   meet42 permissions request <calendar|microphone|speech|screen> [--json]
-//   meet42 permissions open <calendar|microphone|speech|screen>
+//   meet42 permissions request <calendar|microphone|speech|systemAudio> [--json]
+//   meet42 permissions open <calendar|microphone|speech|systemAudio>
 //
 // Every verb that asks macOS about a permission first re-executes itself (`Meet42Daemon.daemonize`, the same
 // step `record start` takes) with "disclaim responsibility" set, so the status it reads and the prompt it
@@ -11,10 +11,10 @@
 // one-time `--reexec` flag marks the second pass.
 
 import AVFoundation
-import CoreGraphics
 import EventKit
 import Foundation
 import Meet42CalendarSync
+import Meet42Capture
 import Meet42Kit
 import Speech
 
@@ -52,7 +52,7 @@ enum PermissionsCommand {
         let before = status(of: permission)
         // macOS only ever shows its prompt for a permission nobody has decided on yet; asking again for
         // one that is denied or restricted is silent. Report that honestly instead of pretending to ask.
-        if before == .notDetermined || !permission.canBeRequestedWithPrompt {
+        if before == .notDetermined {
             _ = await ask(permission)
         }
         let entry = Meet42PermissionEntry(name: permission, status: status(of: permission))
@@ -66,8 +66,7 @@ enum PermissionsCommand {
         exit(entry.status == .granted ? 0 : 1)
     }
 
-    /// Shows the system prompt for `permission` (screen recording has none: it asks macOS to list meet42 and
-    /// opens the Settings page).
+    /// Shows the system prompt for `permission` and waits for the answer.
     private static func ask(_ permission: Meet42Permission) async -> Bool {
         switch permission {
         case .calendar:
@@ -78,10 +77,8 @@ enum PermissionsCommand {
             return await withCheckedContinuation { continuation in
                 SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
             }
-        case .screen:
-            let granted = CGRequestScreenCaptureAccess()
-            if !granted { openSettings(permission) }
-            return granted
+        case .systemAudio:
+            return await SystemAudioPermission.request() == .granted
         }
     }
 
@@ -127,9 +124,12 @@ enum PermissionsCommand {
             case .denied: return .denied
             @unknown default: return .denied
             }
-        case .screen:
-            // CoreGraphics has no "never asked": it is either on or it is not.
-            return CGPreflightScreenCaptureAccess() ? .granted : .denied
+        case .systemAudio:
+            switch SystemAudioPermission.status() {
+            case .granted: return .granted
+            case .denied: return .denied
+            case .notDetermined: return .notDetermined
+            }
         }
     }
 
@@ -147,10 +147,10 @@ enum PermissionsCommand {
 
     private static func parse(_ name: String?) -> Meet42Permission {
         guard let name, !name.isEmpty else {
-            CLI.fail("meet42 permissions: a permission name is required (calendar, microphone, speech, screen)", code: 2)
+            CLI.fail("meet42 permissions: a permission name is required (calendar, microphone, speech, systemAudio)", code: 2)
         }
         guard let permission = Meet42Permission(argument: name) else {
-            CLI.fail("meet42 permissions: unknown permission '\(name)' (calendar, microphone, speech, screen)", code: 2)
+            CLI.fail("meet42 permissions: unknown permission '\(name)' (calendar, microphone, speech, systemAudio)", code: 2)
         }
         return permission
     }
