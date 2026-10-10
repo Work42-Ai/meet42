@@ -9,8 +9,10 @@ description: |
 # meet42-setup — install and set up meet42
 
 meet42 is a separate, signed and notarized command-line tool (github.com/Work42-Ai/meet42), not part of the
-Work42 app. This plugin's widgets and skills call it. Follow these steps in order and stop at the first one that
-fails; say what failed instead of working around it.
+Work42 app. This plugin's widgets and skills call it. **Always ask the user first.** Before installing or updating anything, tell them what you are about to do (download the signed
+meet42 app from github.com/Work42-Ai/meet42 into `~/.work42` and link it into `~/.work42/bin`) and wait for a yes. If they
+decline, stop and carry on without meet42; do not install it later on your own. Then follow these steps in order and stop at
+the first one that fails; say what failed instead of working around it.
 
 ## 1. Install or update the tool
 

@@ -1,14 +1,14 @@
 {
   "slug": "meeting",
   "name": "Meeting",
-  "description": "The meeting lifecycle: Prepare for Meeting, In Meeting, Summary, Done -- driven by the recording lifecycle of the meet42 command-line tool (github.com/Work42-Ai/meet42). meet42 reads the calendar, records and transcribes the meeting, and writes the files this workflow reads; every stage assumes it is installed. If `command -v meet42` prints nothing, the `meet42-setup` skill installs it.",
+  "description": "The meeting lifecycle: Prepare for Meeting, In Meeting, Summary, Done -- driven by the recording lifecycle of the meet42 command-line tool (github.com/Work42-Ai/meet42). meet42 reads the calendar, records and transcribes the meeting, and writes the files this workflow reads; every stage assumes it is installed. If `command -v meet42` prints nothing, ask the user, and with their yes the `meet42-setup` skill installs it.",
   "stages": [
     {
       "name": "Prepare for Meeting",
       "ordinal": 1,
       "is_initial": true,
       "is_terminal": false,
-      "entry_prompt": "You're in Prepare for Meeting. This meeting runs on the meet42 command-line tool: first run `command -v meet42`. If it prints nothing (or a meet42 command fails because the tool is missing), follow the `meet42-setup` skill to install it and grant its permissions before anything else. Then fetch the context this meeting needs -- attendees, recent related threads, open tasks (`meet42 show <event_id>` gives the freshest event details, `meet42 people` the people it knows) -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
+      "entry_prompt": "You're in Prepare for Meeting. This meeting runs on the meet42 command-line tool: first run `command -v meet42`. If it prints nothing (or a meet42 command fails because the tool is missing), ask the user whether they want you to install it (never install it without their yes), and if they agree follow the `meet42-setup` skill to install it and grant its permissions before anything else. Then fetch the context this meeting needs -- attendees, recent related threads, open tasks (`meet42 show <event_id>` gives the freshest event details, `meet42 people` the people it knows) -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
       "entry_gate": null,
       "icon": "tray.and.arrow.down",
       "color_light": "#0284C7",
@@ -21,7 +21,7 @@
       "ordinal": 2,
       "is_initial": false,
       "is_terminal": false,
-      "entry_prompt": "The recording started -- you're now In Meeting, running on Haiku for fast live notes. meet42 is doing the recording (`meet42 record status` shows it) and writing the live transcript to conversation.jsonl in the recording directory stored at meeting/recording_dir. If a meet42 command fails because the tool is missing or too old, follow the `meet42-setup` skill. Keep concise running notes as the conversation happens. Stopping the recording writes meeting/ended_at, which moves this session to Summary.",
+      "entry_prompt": "The recording started -- you're now In Meeting, running on Haiku for fast live notes. meet42 is doing the recording (`meet42 record status` shows it) and writing the live transcript to conversation.jsonl in the recording directory stored at meeting/recording_dir. If a meet42 command fails because the tool is missing or too old, ask the user whether to install or update it, and follow the `meet42-setup` skill only if they agree. Keep concise running notes as the conversation happens. Stopping the recording writes meeting/ended_at, which moves this session to Summary.",
       "entry_gate": "{\"and\":[{\"namespace\":\"meeting\",\"key\":\"started_at\",\"op\":\"exists\"},{\"namespace\":\"meeting\",\"key\":\"ended_at\",\"op\":\"absent\"}]}",
       "icon": "waveform",
       "color_light": "#6D28D9",
