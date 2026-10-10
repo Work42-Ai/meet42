@@ -60,10 +60,11 @@ is logged in `~/.work42/meet42/trace.jsonl` (`src: calendar`, `sync-ok` / `sync-
 **Event popup.** Clicking an event opens a popup in the Event details style: the calendar's colour bar, source and
 status chips, title, absolute time, the meeting link (with its provider and a copy button), location, guests with their
 replies, and the description (the notes as sanitised HTML; Google's `-::~:~::~` divider lines are dropped and long lines
-wrap, so nothing scrolls sideways). The body scrolls vertically; the button row stays at the bottom:
+wrap, so nothing scrolls sideways). The popup is 440 points wide and up to 680 tall; the body scrolls vertically and the button row stays at the bottom:
 - **Join meeting**, opened by macOS (the Zoom or Teams app when installed, otherwise your browser).
-- One AI control: **Open session in Work42** when the event has a session; "Auto at h:mm" (15 minutes before the start)
-  with **Create session now** when the event is AI-assisted and has no session yet; **Enable AI assistance** on a
+- One AI control: **Open session in Work42** when the event has a session; **Create session now** (with a caption
+  "A session is created automatically at h:mm", 15 minutes before the start) when the event is AI-assisted and has no
+  session yet; **Enable AI assistance** on a
   view-only calendar.
 
 **Create session now** creates the event session the same way the automatic one is created, cancels the scheduled
