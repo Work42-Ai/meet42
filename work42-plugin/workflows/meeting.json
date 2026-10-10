@@ -8,7 +8,7 @@
       "ordinal": 1,
       "is_initial": true,
       "is_terminal": false,
-      "entry_prompt": "You're in Prepare for Meeting. Fetch the context this meeting needs -- attendees, recent related threads, open tasks -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
+      "entry_prompt": "You're in Prepare for Meeting. This meeting runs on the meet42 command-line tool: first run `command -v meet42`. If it prints nothing (or a meet42 command fails because the tool is missing), follow the `meet42-setup` skill to install it and grant its permissions before anything else. Then fetch the context this meeting needs -- attendees, recent related threads, open tasks -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
       "entry_gate": null,
       "icon": "tray.and.arrow.down",
       "color_light": "#0284C7",
