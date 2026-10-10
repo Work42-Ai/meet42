@@ -8,7 +8,9 @@
 //     and a copy button, the location, the guest list (a summary with an RSVP bar, then the guests grouped by
 //     reply: Going, Maybe, No reply, Declined) and the description (the notes as sanitised HTML, rendered by the
 //     SDK markdown viewer).
-//   • Header label (every tab): "Starts in N min" → "Live · N min left" → "Ended h:mm", opening this widget.
+//   • Header labels (every tab), both opening this widget: the time ("Starts in N min" → "Live · N min left" →
+//     "Ended h:mm") and the guests, as first names only: "Yan, Ethan, Enmo and 4 more" (amber while anyone is
+//     tentative, pending or unknown).
 //   • Action: **Join** (the provider's brand colour) from 15 minutes before the start to the end; it opens the
 //     meeting link with the operating system.
 //
@@ -133,9 +135,34 @@ final class EventDetailsLabelAgent: WidgetBackgroundAgent {
     private func update(_ event: MeetEvent?) {
         var labels: [WidgetHeaderLabel] = []
         if let event, let item = MeetTimeLabel.label(for: event) {
-            labels = [WidgetHeaderLabel(text: item.text, systemIcon: "clock", tint: item.tint, url: eventLink)]
+            labels.append(WidgetHeaderLabel(text: item.text, systemIcon: "clock", tint: item.tint, url: eventLink))
+        }
+        if let event, let text = Self.guestsText(event.attendees) {
+            labels.append(WidgetHeaderLabel(text: text, tint: event.hasOpenReplies ? .warning : .neutral, url: eventLink))
         }
         if labels != headerLabels { headerLabels = labels }
+    }
+}
+
+extension EventDetailsLabelAgent {
+
+    /// "Yan, Ethan, Enmo and 4 more": first names only. Up to 4 guests are all named ("Yan, Ethan, Enmo and Ana");
+    /// beyond that the first 3 are named and the rest are counted. nil when there are no guests.
+    static func guestsText(_ attendees: [MeetEvent.Attendee]) -> String? {
+        let names = attendees.map(firstName)
+        switch names.count {
+        case 0: return nil
+        case 1: return names[0]
+        case 2...4: return names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        default: return names.prefix(3).joined(separator: ", ") + " and \(names.count - 3) more"
+        }
+    }
+
+    /// The first word of the name, else the part of the email before the "@".
+    private static func firstName(_ person: MeetEvent.Attendee) -> String {
+        let full = person.displayName
+        let word = full.split(separator: " ").first.map(String.init) ?? full
+        return word.split(separator: "@").first.map(String.init) ?? word
     }
 }
 

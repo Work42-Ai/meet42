@@ -22,7 +22,9 @@ description (the event notes as sanitised HTML, rendered by the SDK markdown vie
 is missing or `show` fails, the widget shows the error and the command that failed.
 
 **Header label (every tab):** "Starts in N min" from 60 minutes before the start, "Live · N min left" during the
-meeting, "Ended h:mm" afterwards. It opens this widget (`meet42://widget/event-details`).
+meeting, "Ended h:mm" afterwards. A second label names the guests by first name, "Yan, Ethan, Enmo and 4 more" (up to
+4 guests are all named, beyond that the first 3 and a count), amber while anyone is tentative, pending or unknown.
+Both open this widget (`meet42://widget/event-details`).
 
 **Action:** **Join**, in the provider's brand colour, from 15 minutes before the start until the end, for an event
 with a meeting link. It opens the link with the operating system (the Zoom or Teams app when installed, otherwise the
