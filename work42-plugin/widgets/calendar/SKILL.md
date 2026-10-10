@@ -49,6 +49,27 @@ line), and lets you set the AI assist mode per calendar and per event.
   PlannedDay work-blocks, the sync-status/access header chip, and "Open in
   Calendar". Re-surfaced later via a separate collection.
 
+## Background sync and the event popup
+
+**Calendar sync.** meet42 keeps its own copy of your calendar, and nothing else refreshes it since meet42 left the
+Work42 app. While Work42 runs, this widget's background agent (the one that holds the detector lock) runs
+`meet42 sync` when it starts and every two minutes, but only after Calendar access has been granted to meet42, so it
+never raises a permission prompt from the background. A new or edited event appears within about two minutes. Each run
+is logged in `~/.work42/meet42/trace.jsonl` (`src: calendar`, `sync-ok` / `sync-failed`).
+
+**Event popup.** Clicking an event opens a popup in the Event details style: the calendar's colour bar, source and
+status chips, title, absolute time, the meeting link (with its provider and a copy button), location, guests with their
+replies, and the description (the notes as sanitised HTML; Google's `-::~:~::~` divider lines are dropped and long lines
+wrap, so nothing scrolls sideways). The body scrolls vertically; the button row stays at the bottom:
+- **Join meeting**, opened by macOS (the Zoom or Teams app when installed, otherwise your browser).
+- One AI control: **Open session in Work42** when the event has a session; "Auto at h:mm" (15 minutes before the start)
+  with **Create session now** when the event is AI-assisted and has no session yet; **Enable AI assistance** on a
+  view-only calendar.
+
+**Create session now** creates the event session the same way the automatic one is created, cancels the scheduled
+`mtg:<id>` entry and reloads the popup, so the event never gets a second session. The scheduler also skips events that
+already have a session.
+
 ## Prerequisites
 
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
