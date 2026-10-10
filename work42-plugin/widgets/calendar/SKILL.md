@@ -67,9 +67,11 @@ wrap, so nothing scrolls sideways). The popup is 440 points wide and as tall as 
   session yet; **Enable AI assistance** on a
   view-only calendar.
 
-**Create session now** creates the event session the same way the automatic one is created, cancels the scheduled
-`mtg:<id>` entry and reloads the popup, so the event never gets a second session. The scheduler also skips events that
-already have a session.
+**Create session now** creates the event session in the foreground through the app's global `session.open` intent
+(`typeId` `event`, the title as `name`, `args.event_id`), so Work42 shows its "Setting up your Session" overlay and then
+opens the session selected, like a session started from the app. It then cancels the scheduled `mtg:<id>` entry and
+reloads the popup, so the event never gets a second session. The automatic session 15 minutes before the start is
+still created in the background. The scheduler also skips events that already have a session.
 
 ## Prerequisites
 
