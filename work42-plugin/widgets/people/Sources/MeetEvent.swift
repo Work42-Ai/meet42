@@ -50,6 +50,8 @@ struct MeetEvent: Decodable {
     let notesHTML: String?
     let meetingURL: String?
     let calendarColor: String?
+    /// The Work42 session minted for this event (AI-assisted calendars), when there is one.
+    let sessionId: String?
     let startsAt: Date
     let endsAt: Date
     let allDay: Bool
@@ -57,7 +59,7 @@ struct MeetEvent: Decodable {
 
     private enum Keys: String, CodingKey {
         case id, title, calendarTitle, source, status, location, organizer, notesHTML, meetingURL
-        case calendarColor, startsAt, endsAt, allDay, attendees
+        case calendarColor, sessionId, startsAt, endsAt, allDay, attendees
     }
 
     init(from decoder: any Decoder) throws {
@@ -72,6 +74,7 @@ struct MeetEvent: Decodable {
         notesHTML = try c.decodeIfPresent(String.self, forKey: .notesHTML)
         meetingURL = try c.decodeIfPresent(String.self, forKey: .meetingURL)
         calendarColor = try c.decodeIfPresent(String.self, forKey: .calendarColor)
+        sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId)
         startsAt = try c.decode(Date.self, forKey: .startsAt)
         endsAt = try c.decodeIfPresent(Date.self, forKey: .endsAt) ?? startsAt
         allDay = try c.decodeIfPresent(Bool.self, forKey: .allDay) ?? false
@@ -91,10 +94,16 @@ enum MeetEventState {
 
 enum MeetEventLoader {
 
+    /// The session's linked event: its id comes from session storage `meeting/event_id`.
     static func load(shell: any WidgetShellService, storage: any WidgetStorageService) async -> MeetEventState {
         guard case .string(let id)? = try? await storage.get(namespace: "meeting", key: "event_id"), !id.isEmpty else {
             return .unlinked
         }
+        return await load(eventID: id, shell: shell)
+    }
+
+    /// One event by its calendar id, through `meet42 show <id> --json`.
+    static func load(eventID id: String, shell: any WidgetShellService) async -> MeetEventState {
         let command = "meet42 show \(shellQuote(id)) --json"
         guard let result = try? await shell.run(command: command) else {
             return .failed(command: command, message: "Couldn\u{2019}t run meet42.")

@@ -81,6 +81,8 @@ struct CalEvent: Codable, Identifiable, Equatable {
     let status: Status
     let url: String?
     let meetingURL: String?
+    /// The Work42 session minted for this event (automatically 15 minutes before, or on demand), when there is one.
+    let sessionId: String?
 }
 
 // MARK: - modes get --json payload
@@ -214,6 +216,16 @@ final class CLICalendarStore {
 
     @ObservationIgnored private let services: SessionServices
     @ObservationIgnored private var timer: Timer?
+
+    /// One event in full (`meet42 show <id> --json`), for the event popup.
+    func loadMeetEvent(_ id: String) async -> MeetEventState {
+        await MeetEventLoader.load(eventID: id, shell: services.shell)
+    }
+
+    /// Cancels the automatic session entry for an event whose session was created on demand.
+    func cancelScheduledSession(for eventId: String) async {
+        _ = try? await services.shell.run(command: "work42 schedule cancel --key \(calShellQuote("mtg:\(eventId)"))")
+    }
 
     init(services: SessionServices) {
         self.services = services
@@ -1044,147 +1056,353 @@ struct ClickAnchor: View {
 
 // MARK: - Popover content (calendar-event + per-event assist picker)
 
+/// Loads one event in full for the popup; set by `CalendarRootView` from the store's services.
+private struct CalEventLoaderKey: EnvironmentKey {
+    static let defaultValue: @MainActor (String) async -> MeetEventState = { _ in .unlinked }
+}
+
+/// Cancels the automatic session entry of an event (used after "Create session now").
+private struct CalSessionCancelKey: EnvironmentKey {
+    static let defaultValue: @MainActor (String) async -> Void = { _ in }
+}
+
+extension EnvironmentValues {
+    fileprivate var calEventLoader: @MainActor (String) async -> MeetEventState {
+        get { self[CalEventLoaderKey.self] }
+        set { self[CalEventLoaderKey.self] = newValue }
+    }
+    fileprivate var calSessionCancel: @MainActor (String) async -> Void {
+        get { self[CalSessionCancelKey.self] }
+        set { self[CalSessionCancelKey.self] = newValue }
+    }
+}
+
+/// The event popup: the Event details look, a body that scrolls vertically only, and a pinned button row
+/// (Join meeting + one AI control). Loads the full event through `meet42 show`; until it arrives it draws the
+/// event already in the calendar view.
 struct EventDetailPopover: View {
     let item: CalEvent
     let mode: CalMode
     let onEnableAssistance: () -> Void
     let onDismiss: () -> Void
 
-    private var tint: Color { EventVisual.tint(for: mode) }
-    private var assistedTint: Color { EventVisual.tint(for: .assisted) }
+    @Environment(\.calEventLoader) private var loadEvent
+    @Environment(\.calSessionCancel) private var cancelScheduled
+
+    @State private var event: MeetEvent?
+    @State private var sessionId: String?
+    @State private var creating = false
+    @State private var createError: String?
+
+    private var accent: Color { color(hex: event?.calendarColor) ?? EventVisual.tint(for: mode) }
+    private var link: String? { event?.meetingURL ?? item.meetingURL ?? item.url }
 
     var body: some View {
+        VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: true) {
+                content
+                    .padding(DT.s16)
+                    .frame(width: 380, alignment: .leading)
+            }
+            .frame(maxHeight: 440)
+            Divider().opacity(0.5)
+            buttonRow
+        }
+        .frame(width: 380)
+        .task(id: item.id) {
+            sessionId = item.sessionId
+            if case .loaded(let loaded) = await loadEvent(item.id) {
+                event = loaded
+                if loaded.sessionId != nil { sessionId = loaded.sessionId }
+            }
+        }
+    }
+
+    // MARK: Body
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: DT.s12) {
+            header
+            if let link, let url = URL(string: link), let provider = MeetProvider.detect(link) { meetingCard(url, provider) }
+            if let location = (event?.location ?? item.location)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !location.isEmpty, location != link { locationCard(location) }
+            if !attendees.isEmpty { guestsCard }
+            if let html = descriptionHTML { descriptionCard(html) }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: DT.s12) {
+            RoundedRectangle(cornerRadius: 2).fill(accent).frame(width: 4)
             VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    chip("\(MeetProvider.sourceName(event?.source ?? item.source.rawValue))\((event?.calendarTitle ?? item.calendarTitle).map { " \u{00B7} \($0)" } ?? "")", tint: nil)
+                    if let status = statusChip { chip(status.text, tint: status.tint) }
+                }
                 Text(item.title.isEmpty ? "(Untitled)" : item.title)
-                    .font(.system(size: DT.f17, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .font(.system(size: 19, weight: .bold))
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
-                Text(rangeLabel)
-                    .font(.system(size: DT.f12))
-                    .foregroundStyle(.secondary)
-                if let cal = item.calendarTitle, !cal.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "calendar").font(.system(size: DT.f10, weight: .semibold))
-                        Text(cal).font(.system(size: DT.f11, weight: .semibold))
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    .foregroundStyle(tint)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Capsule(style: .continuous).fill(tint.opacity(0.14)))
+                HStack(spacing: DT.s8) {
+                    Image(systemName: "clock").font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                    Text(timeText).font(.system(size: DT.f12)).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if let loc = item.location, !loc.isEmpty {
-                Label(loc, systemImage: "mappin.and.ellipse")
-                    .font(.system(size: DT.f11))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
+        }
+    }
+
+    private var statusChip: (text: String, tint: Color)? {
+        switch event?.status ?? item.status.rawValue {
+        case "confirmed": return ("Confirmed", DT.green)
+        case "tentative": return ("Tentative", DT.amber)
+        case "canceled": return ("Canceled", DT.red)
+        default: return nil
+        }
+    }
+
+    private var timeText: String {
+        let day = DateFormatter()
+        day.dateFormat = "EEE, MMM d"
+        if item.allDay { return "\(day.string(from: item.startsAt)) \u{00B7} All day" }
+        let start = DateFormatter()
+        start.dateFormat = "h:mm"
+        let end = DateFormatter()
+        end.dateFormat = "h:mm a"
+        return "\(day.string(from: item.startsAt)) \u{00B7} \(start.string(from: item.startsAt)) \u{2013} \(end.string(from: item.endsAt))"
+    }
+
+    private func meetingCard(_ url: URL, _ provider: MeetProvider) -> some View {
+        card {
+            HStack(spacing: DT.s12) {
+                Image(systemName: "video.fill").foregroundStyle(provider.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(provider.name).font(.system(size: DT.f12, weight: .semibold))
+                    Text(url.absoluteString.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""))
+                        .font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                } label: { Image(systemName: "doc.on.doc") }
+                    .glassIconButton()
+                    .help("Copy link")
             }
-            if !item.attendees.isEmpty {
-                Divider().opacity(0.4)
-                Text("ATTENDEES (\(item.attendees.count))")
-                    .font(.system(size: DT.f9, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(DT.textTertiary)
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(item.attendees.prefix(8).enumerated()), id: \.offset) { _, a in
-                        HStack(spacing: 6) {
-                            statusDot(a.status)
-                            Text(a.name ?? a.email ?? "(unknown)")
-                                .font(.system(size: DT.f11, weight: a.isCurrentUser ? .semibold : .regular))
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
+        }
+    }
+
+    private func locationCard(_ location: String) -> some View {
+        card {
+            HStack(spacing: DT.s12) {
+                Image(systemName: "mappin.and.ellipse").foregroundStyle(.secondary)
+                Text(location).font(.system(size: DT.f12)).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    // MARK: Guests
+
+    /// The attendees as the shared model (replies grouped, names falling back to the email).
+    private var attendees: [MeetEvent.Attendee] { event?.attendees ?? [] }
+
+    private var guestsCard: some View {
+        let e = event
+        return card {
+            VStack(alignment: .leading, spacing: DT.s8) {
+                HStack {
+                    HStack(spacing: -7) {
+                        ForEach(Array(attendees.prefix(4).enumerated()), id: \.offset) { _, a in
+                            MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24)
                         }
                     }
-                    if item.attendees.count > 8 {
-                        Text("+\(item.attendees.count - 8) more")
-                            .font(.system(size: DT.f10))
-                            .foregroundStyle(DT.textTertiary)
+                    Text("\(attendees.count) \(attendees.count == 1 ? "person" : "people")")
+                        .font(.system(size: DT.f12, weight: .semibold)).padding(.leading, DT.s8)
+                    Spacer(minLength: 0)
+                    if let e {
+                        Text("\(e.count(.going)) going \u{00B7} \(e.count(.maybe) + e.count(.noReply)) open")
+                            .font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(attendees.prefix(8).enumerated()), id: \.offset) { _, a in
+                        HStack(spacing: DT.s8) {
+                            MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 22)
+                            Text(a.displayName).font(.system(size: DT.f11)).lineLimit(1).truncationMode(.middle)
+                            if a.isOrganizer { smallChip("Organizer", tint: DT.systemAccent) }
+                            if a.isCurrentUser { smallChip("You", tint: nil) }
+                            Spacer(minLength: 0)
+                            Image(systemName: MeetRSVP(status: a.status).symbol).foregroundStyle(MeetRSVP(status: a.status).color)
+                        }
+                    }
+                    if attendees.count > 8 {
+                        Text("+\(attendees.count - 8) more").font(.system(size: DT.f10)).foregroundStyle(.tertiary)
                     }
                 }
             }
-            if let notes = item.notes,
-               !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Divider().opacity(0.4)
-                Text("NOTES")
-                    .font(.system(size: DT.f9, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(DT.textTertiary)
-                Text(notes)
-                    .font(.system(size: DT.f11))
-                    .foregroundStyle(.primary)
-                    .lineLimit(8)
-                    .textSelection(.enabled)
-            }
-            Divider().opacity(0.4)
-            actionRow
         }
-        .padding(DT.s16)
-        .frame(width: 340, alignment: .leading)
+    }
+
+    // MARK: Description
+
+    /// The sanitised notes with Google's `-::~:~::~` divider lines removed; nil when nothing is left.
+    private var descriptionHTML: String? {
+        let raw = event?.notesHTML ?? CalNotes.html(from: item.notes)
+        guard let raw else { return nil }
+        let cleaned = CalNotes.stripDividers(raw)
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : cleaned
+    }
+
+    private func descriptionCard(_ html: String) -> some View {
+        card {
+            VStack(alignment: .leading, spacing: DT.s8) {
+                Label("Description", systemImage: "doc.text")
+                    .font(.system(size: DT.f11, weight: .semibold)).foregroundStyle(.secondary)
+                MarkdownPreview(text: html, autoHeight: true)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    // MARK: Button row (pinned)
+
+    private var buttonRow: some View {
+        HStack(spacing: DT.s8) {
+            if let link, let url = URL(string: link) {
+                Button {
+                    NSWorkspace.shared.open(url)
+                } label: {
+                    Label("Join meeting", systemImage: "video.fill")
+                }
+                .glassProminentCapsule(tint: MeetProvider.detect(link)?.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
+                .help(link)
+            }
+            Spacer(minLength: 0)
+            aiControl
+        }
+        .padding(.horizontal, DT.s12)
+        .padding(.vertical, DT.s8)
+        .background(.ultraThinMaterial)
     }
 
     @ViewBuilder
-    private var actionRow: some View {
-        HStack(spacing: DT.s8) {
-            if let url = item.meetingURL ?? item.url, !url.isEmpty,
-               let parsed = URL(string: url) {
-                Link(destination: parsed) {
-                    actionLabel("Join meeting", symbol: "link", filled: true)
+    private var aiControl: some View {
+        switch mode {
+        case .assisted:
+            if let sessionId {
+                Button {
+                    if let url = URL(string: "work42://session/\(sessionId)") { NSWorkspace.shared.open(url) }
+                } label: {
+                    Label("Open session in Work42", systemImage: "arrow.up.forward.app")
                 }
-                .buttonStyle(.plain)
-                .help(url)
-            }
-            switch mode {
-            case .assisted:
-                actionLabel("AI Assisted", symbol: "sparkles", filled: true)
-            case .viewOnly:
-                Button(action: onEnableAssistance) {
-                    actionLabel("Enable AI assistance", symbol: "sparkles",
-                                filled: false, tint: assistedTint)
+                .glassProminentCapsule(tint: DT.systemAccent)
+            } else {
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: DT.s8) {
+                        Text("Auto at \(autoTime)").font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                        Button {
+                            Task { await createSession() }
+                        } label: {
+                            Label(creating ? "Creating\u{2026}" : "Create session now", systemImage: "sparkles")
+                        }
+                        .glassProminentCapsule(tint: DT.systemAccent)
+                        .disabled(creating)
+                    }
+                    if let createError {
+                        Text(createError).font(.system(size: DT.f10)).foregroundStyle(DT.red)
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Opt this single event into AI assistance. The rest of the calendar stays view-only.")
-            case .aiScheduled:
-                EmptyView()
             }
-            Spacer(minLength: 0)
+        case .viewOnly:
+            Button(action: onEnableAssistance) {
+                Label("Enable AI assistance", systemImage: "sparkles")
+            }
+            .glassPlainCapsule()
+            .help("Opt this single event into AI assistance. The rest of the calendar stays view-only.")
+        case .aiScheduled:
+            EmptyView()
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func actionLabel(_ text: String, symbol: String, filled: Bool,
-                             tint overrideTint: Color? = nil) -> some View {
-        let color = overrideTint ?? tint
-        return HStack(spacing: 6) {
-            Image(systemName: symbol)
-            Text(text).lineLimit(1).fixedSize()
-        }
-        .font(.system(size: DT.f11, weight: .medium))
-        .padding(.horizontal, DT.s8)
-        .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: DT.rButton).fill(filled ? color.opacity(0.16) : Color.clear))
-        .overlay(RoundedRectangle(cornerRadius: DT.rButton)
-            .strokeBorder(color.opacity(filled ? 0 : 0.45), lineWidth: 0.5))
-        .foregroundStyle(color)
-    }
-
-    private var rangeLabel: String {
+    private var autoTime: String {
         let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return "\(f.string(from: item.startsAt)) — \(f.string(from: item.endsAt))"
+        f.dateFormat = "h:mm a"
+        return f.string(from: item.startsAt.addingTimeInterval(-15 * 60))
     }
 
-    private func statusDot(_ status: CalEvent.AttendeeStatus) -> some View {
-        let color: Color
-        switch status {
-        case .accepted:  color = .green
-        case .declined:  color = .red
-        case .tentative: color = .orange
-        case .pending:   color = .gray
-        case .unknown:   color = .gray.opacity(0.5)
+    /// Creates the event session now, through the same path the automatic one uses, cancels the scheduled
+    /// entry so the event doesn't get a second session, and reloads so the button becomes "Open session".
+    private func createSession() async {
+        creating = true
+        createError = nil
+        defer { creating = false }
+        guard let started = await CalendarDetectionAgent.mintEventSession(
+            name: item.title.isEmpty ? "Meeting" : item.title, eventId: item.id, storage: []
+        ) else {
+            createError = "Couldn\u{2019}t create the session."
+            return
         }
-        return Circle().fill(color).frame(width: 7, height: 7)
+        sessionId = started.sessionId
+        await cancelScheduled(item.id)
+        if case .loaded(let loaded) = await loadEvent(item.id), let linked = loaded.sessionId { sessionId = linked }
+    }
+
+    // MARK: Pieces
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .padding(DT.s12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
+            .overlay(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).strokeBorder(DT.chipStroke, lineWidth: 0.5))
+    }
+
+    private func chip(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: DT.f10, weight: .semibold))
+            .foregroundStyle(tint ?? .secondary)
+            .lineLimit(1).truncationMode(.middle)
+            .padding(.horizontal, 8).padding(.vertical, 2)
+            .background(Capsule().fill((tint ?? Color.primary).opacity(tint == nil ? 0.06 : 0.14)))
+    }
+
+    private func smallChip(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(tint ?? .secondary)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(Capsule().fill((tint ?? Color.primary).opacity(tint == nil ? 0.07 : 0.14)))
+    }
+
+    private func color(hex: String?) -> Color? {
+        guard var hex, hex.hasPrefix("#") else { return nil }
+        hex.removeFirst()
+        guard hex.count == 6, let value = UInt32(hex, radix: 16) else { return nil }
+        return Color(red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255, blue: Double(value & 0xFF) / 255)
+    }
+}
+
+/// Notes helpers for the popup: plain text before `meet42 show` answers, and Google's divider removal.
+enum CalNotes {
+
+    /// Escaped HTML for plain-text notes (used until the sanitised `notesHTML` arrives).
+    static func html(from notes: String?) -> String? {
+        guard let notes, !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let escaped = notes.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        return escaped.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "<br>")
+    }
+
+    /// Removes runs of 12 or more `-`, `:`, `~` and `=` characters (Google adds `-::~:~::~...` lines around its Meet
+    /// block), together with the line breaks around them.
+    static func stripDividers(_ html: String) -> String {
+        var text = html.replacingOccurrences(of: #"(<br\s*/?>\s*)*[-:~=]{12,}(\s*<br\s*/?>)*"#, with: "<br>", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"^(\s*<br\s*/?>)+"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(<br\s*/?>\s*)+$"#, with: "", options: .regularExpression)
+        return text
     }
 }
 
@@ -1686,6 +1904,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private var watchProcess: Process?
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
     @ObservationIgnored private var detectorClaimTask: Task<Void, Never>?
     /// True once THIS instance owns the machine-wide detector lock (see
@@ -1734,6 +1953,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         watchTask?.cancel(); watchTask = nil
         watchProcess?.terminate(); watchProcess = nil
         reconcileTask?.cancel(); reconcileTask = nil
+        syncTask?.cancel(); syncTask = nil
         countdownTask?.cancel(); countdownTask = nil
         detectorClaimTask?.cancel(); detectorClaimTask = nil
         if ownsDetectorLock {
@@ -1748,11 +1968,46 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     /// `ownsDetectorLock` is true (initial start, or a later takeover).
     private func beginWatching(_ s: WidgetBackgroundServices) {
         spawnWatchLoop(s)
+        beginCalendarSync(s)
         reconcileTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.reconcileCycle(s)
                 try? await Task.sleep(for: .seconds(30))
             }
+        }
+    }
+
+    // MARK: Calendar sync (background)
+
+    /// Keeps meet42's own copy of the calendar (`calendar.db`) current: nothing else runs the sync since meet42
+    /// left the app, so a new event would never reach the Calendar, Event details or the brief. Runs `meet42 sync`
+    /// at start and then every two minutes while this agent owns the detector lock. It only runs once Calendar
+    /// access has been granted to meet42, so it never raises a permission prompt from the background; a failed
+    /// run is logged to the trace and simply retried on the next cycle.
+    private func beginCalendarSync(_ s: WidgetBackgroundServices) {
+        syncTask?.cancel()
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let self { await self.syncCalendarOnce(s) }
+                try? await Task.sleep(for: .seconds(120))
+            }
+        }
+    }
+
+    private func syncCalendarOnce(_ s: WidgetBackgroundServices) async {
+        guard let permissions = try? await s.shell.run(command: "meet42 permissions --json"), permissions.exitCode == 0,
+              let data = permissions.stdout.data(using: .utf8),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]],
+              rows.contains(where: { ($0["name"] as? String) == "calendar" && ($0["status"] as? String) == "granted" })
+        else { return }
+        guard let result = try? await s.shell.run(command: "meet42 sync") else {
+            Meet42Trace.log("calendar", "sync-failed", ["reason": "shell"])
+            return
+        }
+        if result.exitCode == 0 {
+            Meet42Trace.log("calendar", "sync-ok", ["output": String(result.stdout.prefix(120))])
+        } else {
+            Meet42Trace.log("calendar", "sync-failed", ["exit": String(result.exitCode), "stderr": String(result.stderr.prefix(200))])
         }
     }
 
@@ -2066,7 +2321,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     /// Resolve the bundled `work42` binary the same way `meet42Invocation`
     /// resolves `meet42` — same-flavor bundle lookup first, PATH fallback for
     /// non-bundle dev contexts.
-    private static func work42Invocation(
+    static func work42Invocation(
         extraArgs: [String]
     ) -> (executable: URL, arguments: [String]) {
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/work42")
@@ -2079,7 +2334,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     /// Mint a fresh event session without selecting it in the app. The CLI has
     /// its own timeout, so this detached process always exits and can be
     /// awaited directly without temp-file polling.
-    private static func mintEventSession(
+    static func mintEventSession(
         name: String, eventId: String?, storage: [(key: String, json: String)]
     ) async -> SessionStartResult? {
         var args = [
@@ -2099,7 +2354,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return try? JSONDecoder().decode(SessionStartResult.self, from: data)
     }
 
-    private static func runToCompletion(
+    static func runToCompletion(
         executable: URL, arguments: [String]
     ) async -> (Int32, Data)? {
         await withCheckedContinuation { continuation in
@@ -2217,6 +2472,8 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         for e in events {
             let mode = modes.events[e.id] ?? modes.calendars[e.calendarId] ?? .viewOnly
             guard mode == .assisted else { continue }
+            // An event that already has a session (created on demand, or automatically earlier) gets no second one.
+            if e.sessionId != nil { continue }
             let key = "mtg:\(e.id)"
             desired.insert(key)
             let at = e.startsAt.addingTimeInterval(-15 * 60)
@@ -2329,7 +2586,7 @@ private nonisolated final class FirstLineProcessOutput: @unchecked Sendable {
 }
 
 /// Decode target for `work42 session start --type event --json`.
-private struct SessionStartResult: Decodable {
+struct SessionStartResult: Decodable {
     let sessionId: String
     let ownerDir: String?
     enum CodingKeys: String, CodingKey {
@@ -2509,6 +2766,8 @@ private struct CalendarRootView: View {
                     content(store)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .environment(\.calEventLoader, { id in await store.loadMeetEvent(id) })
+                .environment(\.calSessionCancel, { id in await store.cancelScheduledSession(for: id) })
                 // Invisible 0×0 anchor for the settings popover opened by the ⚙
                 // action-area intent (CalendarWidget.intents last entry). The popover
                 // needs a visual anchor inside the widget body even though its trigger
