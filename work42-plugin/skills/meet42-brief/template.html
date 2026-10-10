@@ -1,0 +1,67 @@
+<!-- meet42-brief template: replace every example with real content, drop sections that don't apply, add what the meeting needs. -->
+<style>
+  .mb { display: flex; flex-direction: column; gap: var(--w42-s16); }
+  .mb h3 { margin: 0 0 var(--w42-s8); font-size: var(--w42-f11); text-transform: uppercase; letter-spacing: .06em; color: var(--w42-text-tertiary); }
+  .mb-av { width: 26px; height: 26px; border-radius: 50%; display: inline-grid; place-items: center; color: #fff; font-size: 10.5px; font-weight: 600; margin-right: var(--w42-s8); }
+  .mb-row { display: flex; align-items: center; gap: var(--w42-s8); padding: var(--w42-s8) 0; }
+  .mb-row + .mb-row { border-top: .5px solid color-mix(in srgb, var(--w42-text-primary) 10%, transparent); }
+  .mb-key { font-family: ui-monospace, Menlo, monospace; font-size: var(--w42-f11); color: var(--w42-text-secondary); min-width: 64px; }
+  .mb-grow { flex: 1; min-width: 0; }
+</style>
+<div class="mb">
+
+  <!-- Header: title, when, where, how to join -->
+  <div class="w42-card">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:var(--w42-s12)">
+      <div>
+        <div style="font-size:var(--w42-f20);font-weight:700">Q4 roadmap review</div>
+        <div style="color:var(--w42-text-secondary)">Thu Oct 16 · 2:00 – 2:45 PM · Google Meet</div>
+      </div>
+      <a class="w42-btn w42-btn-primary w42-btn-sm" href="https://meet.google.com/qzr-hwpd-xk">Join</a>
+    </div>
+  </div>
+
+  <!-- Why we're meeting: the goal in one or two lines, inferred from the invite and the context you found -->
+  <section>
+    <h3>Why we're meeting</h3>
+    <div>Agree on the top three Q4 bets and an owner for each. Sync v2 has no owner yet, and SSO depends on a security review.</div>
+  </section>
+
+  <!-- People: who, their role or what they are waiting on, and where it came from (link) -->
+  <section>
+    <h3>People</h3>
+    <div class="w42-card">
+      <div class="mb-row"><span class="mb-av" style="background:#ff4d6d">AS</span><div class="mb-grow"><b>Ana Silva</b> · organizer<br><span style="color:var(--w42-text-secondary)">Wrote the <a href="https://example.com/q4-plan">Q4 planning doc</a>; waiting on owners for sync v2.</span></div></div>
+      <div class="mb-row"><span class="mb-av" style="background:#2563eb">ML</span><div class="mb-grow"><b>Marcus Lee</b><br><span style="color:var(--w42-text-secondary)">Owns security reviews: <a href="https://example.com/WOR-98">WOR-98</a> is blocked on him.</span></div></div>
+    </div>
+  </section>
+
+  <!-- From your sources: one card per connected source; every item is a direct link with its state -->
+  <section>
+    <h3>From your sources</h3>
+    <div class="w42-card">
+      <div class="mb-row"><span class="mb-key">WOR-112</span><div class="mb-grow"><a href="https://example.com/WOR-112">Sync v2: conflict resolution</a></div><span class="w42-badge w42-badge-warn">In Progress · no owner</span></div>
+      <div class="mb-row"><span class="mb-key">WOR-98</span><div class="mb-grow"><a href="https://example.com/WOR-98">Enterprise SSO (SAML)</a></div><span class="w42-badge">Blocked</span></div>
+      <div class="mb-row"><span class="mb-key">PR #441</span><div class="mb-grow"><a href="https://example.com/pr/441">Onboarding checklist v2</a></div><span class="w42-badge w42-badge-success">Approved</span></div>
+    </div>
+  </section>
+
+  <!-- Open items and decisions needed -->
+  <section>
+    <h3>Open items &amp; decisions needed</h3>
+    <ul style="margin:0;padding-left:var(--w42-s20)">
+      <li>Who owns sync v2? (<a href="https://example.com/WOR-112">WOR-112</a>)</li>
+      <li>Start SSO before or after the security review? (<a href="https://example.com/WOR-98">WOR-98</a>)</li>
+    </ul>
+  </section>
+
+  <!-- Suggested agenda and questions to ask -->
+  <section>
+    <h3>Suggested agenda &amp; questions</h3>
+    <ol style="margin:0;padding-left:var(--w42-s20)">
+      <li>Q3 recap (5 min)</li>
+      <li>Pick the three bets</li>
+      <li>Owners and dates</li>
+    </ol>
+  </section>
+</div>

@@ -1,0 +1,56 @@
+<!-- meet42-summary template: replace every example with real content, drop sections that don't apply. -->
+<style>
+  .ms { display: flex; flex-direction: column; gap: var(--w42-s16); }
+  .ms h3 { margin: 0 0 var(--w42-s8); font-size: var(--w42-f11); text-transform: uppercase; letter-spacing: .06em; color: var(--w42-text-tertiary); }
+  .ms-av { width: 26px; height: 26px; border-radius: 50%; display: inline-grid; place-items: center; color: #fff; font-size: 10.5px; font-weight: 600; flex: none; }
+  .ms-stack .ms-av { margin-left: -7px; box-shadow: 0 0 0 2px var(--w42-surface); } .ms-stack .ms-av:first-child { margin-left: 0; }
+  .ms-row { display: flex; align-items: center; gap: var(--w42-s8); padding: var(--w42-s8) 0; }
+  .ms-row + .ms-row { border-top: .5px solid color-mix(in srgb, var(--w42-text-primary) 10%, transparent); }
+  .ms-grow { flex: 1; min-width: 0; }
+</style>
+<div class="ms">
+
+  <!-- Header: title, when, how long, who was there (avatars) -->
+  <div class="w42-card" style="display:flex;justify-content:space-between;align-items:center;gap:var(--w42-s12)">
+    <div>
+      <div style="font-size:var(--w42-f20);font-weight:700">Q4 roadmap review</div>
+      <div style="color:var(--w42-text-secondary)">Thu Oct 16 · 2:00 – 2:38 PM · 38 min</div>
+    </div>
+    <div class="ms-stack" style="display:flex">
+      <span class="ms-av" style="background:#ff4d6d">AS</span><span class="ms-av" style="background:#2563eb">ML</span><span class="ms-av" style="background:#0ea56b">PR</span><span class="ms-av" style="background:#e8770e">YR</span>
+    </div>
+  </div>
+
+  <section>
+    <h3>Overview</h3>
+    <div>Onboarding, sync v2 and SSO are the Q4 bets. SSO waits for the security review; sync v2 ships first without offline mode.</div>
+  </section>
+
+  <section>
+    <h3>Decisions</h3>
+    <ul style="margin:0;padding-left:var(--w42-s20)">
+      <li>Sync v2 ships without offline mode first</li>
+      <li>SSO starts after the security review (about two weeks)</li>
+    </ul>
+  </section>
+
+  <!-- Action items: owner avatar + name, what to do, a link when it maps to an issue or PR, a due date when one was said -->
+  <section>
+    <h3>Action items</h3>
+    <div class="w42-card">
+      <div class="ms-row"><span class="ms-av" style="background:#0ea56b">PR</span><div class="ms-grow"><b>Priya</b> owns sync v2 and scopes it · <a href="https://example.com/WOR-112">WOR-112</a></div><span class="w42-badge">Oct 23</span></div>
+      <div class="ms-row"><span class="ms-av" style="background:#2563eb">ML</span><div class="ms-grow"><b>Marcus</b> schedules the security review · <a href="https://example.com/WOR-98">WOR-98</a></div><span class="w42-badge">This week</span></div>
+      <div class="ms-row"><span class="ms-av" style="background:#ff4d6d">AS</span><div class="ms-grow"><b>Ana</b> updates the <a href="https://example.com/q4-plan">Q4 planning doc</a></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Open questions</h3>
+    <ul style="margin:0;padding-left:var(--w42-s20)"><li>Partner API timeline (Tom wasn't there)</li></ul>
+  </section>
+
+  <section>
+    <h3>Resources mentioned</h3>
+    <div><a href="https://example.com/q4-plan">Q4 planning doc</a> · <a href="https://example.com/pr/441">PR #441 Onboarding checklist v2</a></div>
+  </section>
+</div>

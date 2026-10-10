@@ -59,7 +59,7 @@ identity, so the prompts name meet42, not Work42 or the terminal.
 - `denied`: macOS will not ask again; ask the user to switch meet42 on in System Settings.
   `meet42 permissions open <name>` opens the right pane.
 
-The **meet42 permissions** widget on an event's Brief tab shows the same four rows with a button each.
+When any permission is not granted, open the **meet42 permissions** widget for the user with `work42 widget w_widget_permissions open` (it is listed for event sessions but on no tab) and walk them through its four rows: each has a button, **Request** for a permission macOS hasn't asked about yet and **Open Settings** for the rest.
 
 ## 3. Load the calendar
 

@@ -8,7 +8,7 @@
       "ordinal": 1,
       "is_initial": true,
       "is_terminal": false,
-      "entry_prompt": "You're in Prepare for Meeting. This meeting runs on the meet42 command-line tool: first run `command -v meet42`. If it prints nothing (or a meet42 command fails because the tool is missing), ask the user whether they want you to install it (never install it without their yes), and if they agree follow the `meet42-setup` skill to install it and grant its permissions before anything else. Then fetch the context this meeting needs -- attendees, recent related threads, open tasks (`meet42 show <event_id>` gives the freshest event details, `meet42 people` the people it knows) -- so it's ready before the meeting starts. Starting the recording writes meeting/started_at, which moves this session to In Meeting.",
+      "entry_prompt": "You're in Prepare for Meeting. This meeting runs on the meet42 command-line tool. (1) Run `command -v meet42`. If it prints nothing (or a meet42 command fails because the tool is missing), ask the user whether they want you to install it (never install it without their yes); if they agree, follow the `meet42-setup` skill to install it and grant its permissions before anything else. (2) Transitions are yours to make: when a system event says In Meeting (or Summary, or Done) is now available, run `work42 transition \"<that stage>\"` immediately, even in the middle of another step. Starting the recording writes meeting/started_at, which makes In Meeting available. (3) Read the event with `meet42 show \"$(work42 storage get meeting/event_id)\" --json` (skip it when meeting/event_id is unset: this is an ad-hoc event). It has the title, time, location, meeting link, organizer, attendees with their replies and the description as `notesHTML`. (4) Look at what else this session can reach: run `work42 widget list` and use any other widget's source that helps you prepare (their skills explain how to read them); do not assume which plugins exist. (5) Build the meeting brief as the `meeting-brief` artifact following the `meet42-brief` skill, with a direct link for every resource it highlights.",
       "entry_gate": null,
       "icon": "tray.and.arrow.down",
       "color_light": "#0284C7",
@@ -21,12 +21,12 @@
       "ordinal": 2,
       "is_initial": false,
       "is_terminal": false,
-      "entry_prompt": "The recording started -- you're now In Meeting, running on Haiku for fast live notes. meet42 is doing the recording (`meet42 record status` shows it) and writing the live transcript to conversation.jsonl in the recording directory stored at meeting/recording_dir. If a meet42 command fails because the tool is missing or too old, ask the user whether to install or update it, and follow the `meet42-setup` skill only if they agree. The user types their own notes into annotations.md in your session directory while the meeting runs; read it as you go and treat it as the priority signal. Keep concise running notes as the conversation happens. Stopping the recording writes meeting/ended_at, which moves this session to Summary.",
+      "entry_prompt": "The recording started -- you're now In Meeting, running on Sonnet to follow the conversation. meet42 is doing the recording (`meet42 record status` shows it) and writing the live transcript to conversation.jsonl in the recording directory from `work42 storage get meeting/recording_dir`. If a meet42 command fails because the tool is missing or too old, ask the user whether to install or update it, and follow the `meet42-setup` skill only if they agree. Keep concise running notes as the conversation happens and answer what the user asks in chat. Stopping the recording writes meeting/ended_at, which makes Summary available: as soon as a system event says Summary is now available, run `work42 transition \"Summary\"` immediately, even in the middle of another step.",
       "entry_gate": "{\"and\":[{\"namespace\":\"meeting\",\"key\":\"started_at\",\"op\":\"exists\"},{\"namespace\":\"meeting\",\"key\":\"ended_at\",\"op\":\"absent\"}]}",
       "icon": "waveform",
       "color_light": "#6D28D9",
       "color_dark": "#9D6BFF",
-      "model": "haiku",
+      "model": "sonnet",
       "provider": "claude"
     },
     {
@@ -34,12 +34,12 @@
       "ordinal": 3,
       "is_initial": false,
       "is_terminal": false,
-      "entry_prompt": "The recording stopped -- you're now in Summary, and this is the most important step: build the best possible summary of the meeting. Read everything it produced, in this order. (1) The user's own notes: annotations.md in your session directory (your working directory). They show what the user thought mattered, so anchor the summary on them. (2) The event details: meeting.json in your session directory (title, time, attendees, location) -- skip it if there is none. (3) The transcript meet42 wrote: conversation.jsonl in the recording directory, whose path is `work42 storage get meeting/recording_dir`. Each line is a JSON object with speaker (\"You\" is the user, \"Them\" the other side, or a name), text and audioStartSeconds; read all of it before writing. Use the transcript to fill in context, decisions and exact wording behind each note, and to catch important points the notes missed. Never invent anything that is in neither source; say so plainly when something is unclear or missing. Write the summary as markdown to summary.md in your session directory (the Summary tab renders that file) with these sections: a one-paragraph overview, Decisions, Action items (owner and due date when stated), Open questions, and Key points from the user's notes. Then run `work42 storage set meeting/summary '\"summary.md\"'` and `work42 transition \"Done\"`.",
+      "entry_prompt": "The recording stopped -- you're now in Summary, and this is the most important step: build the best possible summary of the meeting. Read everything it produced. (1) The transcript meet42 wrote: conversation.jsonl in the recording directory from `work42 storage get meeting/recording_dir`. Each line is a JSON object with speaker (\"You\" is the user, \"Speaker N\" or \"Them\" are the other side), text and audioStartSeconds; read all of it before writing. (2) The event: `meet42 show \"$(work42 storage get meeting/event_id)\" --json` (skip it when unset). (3) The brief you built: the `meeting-brief` artifact. Never invent anything that is in none of these; say so plainly when something is unclear or missing. First attribute speakers: for each \"Speaker N\" you can match to an attendee with confidence (they are addressed by name, introduce themselves, or the brief says who owns a topic), write the recording directory's speakers.json as {\"Speaker 1\": {\"name\": \"<attendee name>\", \"email\": \"<attendee email>\"}}; leave out any speaker you are not sure about. A wrong name is worse than none. Then build the summary as the `meeting-summary` artifact following the `meet42-summary` skill (header with attendees, overview, decisions, action items with owner, due date and a link when they map to an issue or PR, open questions, and resources mentioned, each as a direct link), using the attributed names. Finally run `work42 storage set meeting/summary '{\"artifact\":\"meeting-summary\",\"action_items\":N}'` with N the number of action items, and `work42 transition \"Done\"`.",
       "entry_gate": "{\"namespace\": \"meeting\", \"key\": \"ended_at\", \"op\": \"exists\"}",
       "icon": "doc.text",
       "color_light": "#B45309",
       "color_dark": "#FFC766",
-      "model": "sonnet",
+      "model": "haiku",
       "provider": "claude"
     },
     {
@@ -333,6 +333,18 @@
       "stage": "Prepare for Meeting",
       "kind": "execute",
       "pattern": "meet42",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "work42 artifact",
+      "action": "allow"
+    },
+    {
+      "stage": "Prepare for Meeting",
+      "kind": "execute",
+      "pattern": "work42 widget",
       "action": "allow"
     },
     {
@@ -648,6 +660,18 @@
       "action": "allow"
     },
     {
+      "stage": "In Meeting",
+      "kind": "execute",
+      "pattern": "work42 artifact",
+      "action": "allow"
+    },
+    {
+      "stage": "In Meeting",
+      "kind": "execute",
+      "pattern": "work42 widget",
+      "action": "allow"
+    },
+    {
       "stage": "Summary",
       "kind": "execute",
       "pattern": "cat",
@@ -891,6 +915,18 @@
       "stage": "Summary",
       "kind": "execute",
       "pattern": "meet42",
+      "action": "allow"
+    },
+    {
+      "stage": "Summary",
+      "kind": "execute",
+      "pattern": "work42 artifact",
+      "action": "allow"
+    },
+    {
+      "stage": "Summary",
+      "kind": "execute",
+      "pattern": "work42 widget",
       "action": "allow"
     },
     {
