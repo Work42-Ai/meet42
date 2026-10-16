@@ -41,7 +41,7 @@ folder `templates/` next to this file has one template per kind of meeting (`gen
 
 ## Avatars
 
-Owners and speakers get a round initials avatar. The templates show the exact markup; only the gradient depends on the
+Owners and speakers get a round initials avatar. The templates show the exact markup; only the colour depends on the
 person. It must match the widgets: it comes from their email
 (else their name), lowercased, with FNV-1a modulo 6. Compute the number with:
 
@@ -49,18 +49,19 @@ person. It must match the widgets: it comes from their email
 python3 -c 'import sys;h=0xcbf29ce484222325;[h:=((h^b)*0x100000001b3)&0xFFFFFFFFFFFFFFFF for b in sys.argv[1].lower().encode()];print(h%6)' "ana@acme.com"
 ```
 
-and use the gradient classes for that number (put them after `bg-gradient-to-br`):
+and use the colour classes for that number. Avatars follow the Apple look: one solid system colour with a soft sheen on top,
+so every avatar is `<colour> bg-gradient-to-b from-on-accent/25 to-transparent`:
 
-| n | classes |
+| n | colour class |
 | -- | -- |
-| 0 | `from-danger to-warning` |
-| 1 | `from-info to-accent` |
-| 2 | `from-success to-info` |
-| 3 | `from-accent to-danger` |
-| 4 | `from-caution to-warning` |
-| 5 | `from-label-tertiary to-label-secondary` |
+| 0 | `bg-danger` |
+| 1 | `bg-accent` |
+| 2 | `bg-success` |
+| 3 | `bg-warning` |
+| 4 | `bg-info` |
+| 5 | `bg-label-tertiary` |
 
-Sizes: `size-[22px] text-2xs` small (owners, updates), `size-[30px] text-sm` default, `size-10 text-xl` for the 1:1 header.
+Sizes: `size-[22px] text-2xs` for owners, `size-7 text-xs` for update rows, `size-9 text-md` for people lists and stacks, `size-10 text-xl` for the 1:1 header.
 Initials are the first letters of the first and last word of the name (else the first two letters of the email).
 
 ## Rules
