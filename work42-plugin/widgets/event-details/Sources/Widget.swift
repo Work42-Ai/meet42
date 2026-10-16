@@ -329,7 +329,7 @@ private struct EventCard: View {
                 HStack(spacing: -8) {
                     ForEach(Array(event.attendees.prefix(4).enumerated()), id: \.offset) { _, a in
                         MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
-                                       key: MeetAvatar.key(name: a.name, email: a.email), size: 30)
+                                       key: MeetAvatar.key(name: a.name, email: a.email), size: 30, stacked: true)
                     }
                 }
                 VStack(alignment: .leading, spacing: 1) {

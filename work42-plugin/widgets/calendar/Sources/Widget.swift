@@ -1247,7 +1247,7 @@ struct EventDetailPopover: View {
                     HStack(spacing: -7) {
                         ForEach(Array(attendees.prefix(4).enumerated()), id: \.offset) { _, a in
                             MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
-                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24)
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24, stacked: true)
                         }
                     }
                     Text("\(attendees.count) \(attendees.count == 1 ? "person" : "people")")

@@ -1266,7 +1266,7 @@ struct TranscriptIdentity {
     let name: String
     let initials: String
     let key: String
-    let gradient: (Color, Color)?
+    let color: Color?
     let muted: Bool
 
     static func resolve(
@@ -1277,27 +1277,27 @@ struct TranscriptIdentity {
             if let me {
                 return TranscriptIdentity(
                     name: "You", initials: MeetAvatar.initials(name: me.name, email: me.email),
-                    key: MeetAvatar.key(name: me.name, email: me.email), gradient: nil, muted: false
+                    key: MeetAvatar.key(name: me.name, email: me.email), color: nil, muted: false
                 )
             }
-            return TranscriptIdentity(name: "You", initials: "Y", key: "you", gradient: MeetAvatar.palette[4], muted: false)
+            return TranscriptIdentity(name: "You", initials: "Y", key: "you", color: MeetAvatar.palette[4], muted: false)
         case .them:
             let label = line.speakerLabel ?? "Them"
             if let matched = speakers[label] ?? speakers["Them"] ?? speakers["them"] {
                 return TranscriptIdentity(
                     name: matched.name, initials: MeetAvatar.initials(name: matched.name, email: matched.email),
-                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), gradient: nil, muted: false
+                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), color: nil, muted: false
                 )
             }
             if label.hasPrefix("Speaker "), let n = Int(label.dropFirst("Speaker ".count)) {
                 return TranscriptIdentity(
                     name: label, initials: "S\(n)", key: label,
-                    gradient: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
+                    color: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
                 )
             }
-            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", gradient: MeetAvatar.palette[5], muted: true)
+            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", color: MeetAvatar.palette[5], muted: true)
         case .unknown:
-            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", gradient: MeetAvatar.palette[5], muted: true)
+            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", color: MeetAvatar.palette[5], muted: true)
         }
     }
 }
@@ -1475,7 +1475,7 @@ private struct RecordingTileView: View {
     ) -> some View {
         let who = TranscriptIdentity.resolve(line: line, speakers: speakers, me: eventState.currentUser)
         HStack(alignment: .top, spacing: DT.s8) {
-            MeetAvatarView(initials: who.initials, key: who.key, size: 26, gradient: who.gradient)
+            MeetAvatarView(initials: who.initials, key: who.key, size: 26, color: who.color)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(who.name)
