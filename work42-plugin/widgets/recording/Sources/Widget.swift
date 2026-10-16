@@ -1330,6 +1330,9 @@ private struct RecordingTileView: View {
 
     /// The transcript, read incrementally (only appended lines are parsed, off the main thread).
     @State private var tail = TranscriptTail()
+    /// The signed-in account (name and profile photo) for my own lines; nil until read, or when
+    /// signed out, in which case my avatar falls back to initials.
+    @State private var account: WidgetAccountUser?
     @State private var speakersWatcher = WidgetFileWatcher()
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
@@ -1366,6 +1369,7 @@ private struct RecordingTileView: View {
                 if case .loaded(let event) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
                     eventState.currentUser = event.attendees.first(where: { $0.isCurrentUser })
                 }
+                account = await services.account?.currentUser()
                 try? await Task.sleep(for: .seconds(60))
             }
         }
@@ -1454,6 +1458,8 @@ private struct RecordingTileView: View {
             resetKey: recordingDir ?? "",
             rowSpacing: 12,
             runSpacing: 4,
+            // A transcript is about who said what: every run is labeled, mine included, even 1:1.
+            labels: .always,
             dividerLabel: ConversationDateDivider.clockLabel(for:),
             actor: { conversationActor(for: $0, speakers: speakers) },
             date: { parseISO8601($0.ts) }
@@ -1467,10 +1473,15 @@ private struct RecordingTileView: View {
     private func conversationActor(for line: RecordingLine, speakers: [String: ResolvedSpeaker]) -> ConversationActor? {
         guard case .speaker(let spoken) = line else { return nil }
         let who = TranscriptIdentity.resolve(line: spoken, speakers: speakers, me: eventState.currentUser)
+        let color = who.color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: who.key)]
+        guard spoken.speaker == .you else {
+            return ConversationActor(id: who.key, name: who.name, initials: who.initials, color: color, isMe: false)
+        }
+        // My own lines: my account's profile photo when signed in with one, else my initials.
+        let initials = account.map { MeetAvatar.initials(name: $0.displayName, email: $0.email) } ?? who.initials
         return ConversationActor(
-            id: who.key, name: who.name, initials: who.initials,
-            color: who.color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: who.key)],
-            isMe: spoken.speaker == .you
+            id: who.key, name: who.name, initials: initials.isEmpty || initials == "?" ? who.initials : initials,
+            color: color, isMe: true, imageURL: account?.photoURL
         )
     }
 
