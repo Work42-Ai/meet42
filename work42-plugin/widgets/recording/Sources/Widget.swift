@@ -93,6 +93,14 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
         }
     }
 
+    /// The line's ISO 8601 timestamp, whichever kind it is.
+    var ts: String {
+        switch self {
+        case .speaker(let l): return l.ts
+        case .systemEvent(let e): return e.ts
+        }
+    }
+
     /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`). `byteOffset` is
     /// where the line starts in the file; it names lines that carry no `lineId`, so a re-read of
     /// the same bytes yields the same ids (a fresh `UUID()` per read made SwiftUI rebuild every row).
@@ -1347,25 +1355,7 @@ private struct RecordingTileView: View {
             if lines.isEmpty {
                 emptyState
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(lines) { line in
-                                recordingBubble(for: line, speakers: speakers)
-                                    .id(line.id)
-                            }
-                        }
-                        .padding(.horizontal, DT.s12)
-                        .padding(.vertical, DT.s8)
-                    }
-                    .onChange(of: lines.count) { _, _ in
-                        if let last = lines.last {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
+                transcript(lines: lines, speakers: speakers)
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -1454,45 +1444,55 @@ private struct RecordingTileView: View {
         .padding(.top, DT.s8)
     }
 
-    @ViewBuilder
-    private func recordingBubble(
-        for line: RecordingLine,
-        speakers: [String: ResolvedSpeaker]
-    ) -> some View {
-        switch line {
-        case .speaker(let s): speakerBubble(for: s, speakers: speakers)
-        case .systemEvent(let e): systemEventCard(for: e)
+    /// Windowing, bottom pinning, automatic older-page loading and the "Jump to latest" pill come
+    /// from the shared `ConversationView` (Work42UI), the same component as the agent chat.
+    /// `lines` only ever grows by the appended lines (`TranscriptTail`).
+    private func transcript(lines: [RecordingLine], speakers: [String: ResolvedSpeaker]) -> some View {
+        ConversationView(
+            items: lines,
+            pageSize: 100,
+            resetKey: recordingDir ?? "",
+            rowSpacing: 12,
+            runSpacing: 4,
+            dividerLabel: ConversationDateDivider.clockLabel(for:),
+            actor: { conversationActor(for: $0, speakers: speakers) },
+            date: { parseISO8601($0.ts) }
+        ) { line, context in
+            recordingRow(for: line, context: context)
         }
     }
 
-    /// One transcript line: the shared People-style avatar, the speaker's name and time, and the text.
-    /// You = the current user (from the linked event, else "Y"); `Speaker N` = a numbered avatar with a stable
-    /// colour; `Them` = grey; a speaker the agent matched in speakers.json = that person's name and People avatar.
+    /// The conversation actor for a transcript line. System events belong to no one, so they
+    /// neither count towards "three or more speakers" nor break a speaker's run.
+    private func conversationActor(for line: RecordingLine, speakers: [String: ResolvedSpeaker]) -> ConversationActor? {
+        guard case .speaker(let spoken) = line else { return nil }
+        let who = TranscriptIdentity.resolve(line: spoken, speakers: speakers, me: eventState.currentUser)
+        return ConversationActor(
+            id: who.key, name: who.name, initials: who.initials,
+            color: who.color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: who.key)],
+            isMe: spoken.speaker == .you
+        )
+    }
+
+    /// One row: a speaker line in a chat bubble (you trailing in the accent, others leading; with three
+    /// or more speakers a run's first line carries the glass avatar, name and time), or a centred
+    /// system-event card.
     @ViewBuilder
-    private func speakerBubble(
-        for line: RecordingLine.SpeakerLine,
-        speakers: [String: ResolvedSpeaker]
-    ) -> some View {
-        let who = TranscriptIdentity.resolve(line: line, speakers: speakers, me: eventState.currentUser)
-        HStack(alignment: .top, spacing: DT.s8) {
-            MeetAvatarView(initials: who.initials, key: who.key, size: 26, color: who.color)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(who.name)
-                        .font(.system(size: DT.f11, weight: .semibold))
-                        .foregroundStyle(who.muted ? DT.textSecondary : DT.textPrimary)
-                    if let date = parseISO8601(line.ts) {
-                        Text(date, style: .time).font(.system(size: DT.f10)).foregroundStyle(DT.textTertiary)
-                    }
-                }
-                Text(line.text)
-                    .font(.system(size: DT.f12))
+    private func recordingRow(for line: RecordingLine, context: ConversationRowContext) -> some View {
+        switch line {
+        case .speaker(let spoken):
+            ConversationBubble(context: context) {
+                Text(spoken.text)
+                    .font(.system(size: 16))
+                    .lineSpacing(5)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
             }
-            Spacer(minLength: 0)
+        case .systemEvent(let event):
+            systemEventCard(for: event)
         }
-        .padding(.vertical, 2)
     }
 
     /// A system-event entry as a CENTERED, visually distinct card. The image
