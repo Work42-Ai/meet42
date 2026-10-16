@@ -1481,7 +1481,8 @@ private struct RecordingTileView: View {
         let initials = account.map { MeetAvatar.initials(name: $0.displayName, email: $0.email) } ?? who.initials
         return ConversationActor(
             id: who.key, name: who.name, initials: initials.isEmpty || initials == "?" ? who.initials : initials,
-            color: color, isMe: true, imageURL: account?.photoURL
+            // My bubble is the accent colour, so my label and avatar ring are too.
+            color: DT.systemAccent, isMe: true, imageURL: account?.photoURL
         )
     }
 
