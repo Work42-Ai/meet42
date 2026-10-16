@@ -49,17 +49,22 @@ person. It must match the widgets: it comes from their email
 python3 -c 'import sys;h=0xcbf29ce484222325;[h:=((h^b)*0x100000001b3)&0xFFFFFFFFFFFFFFFF for b in sys.argv[1].lower().encode()];print(h%6)' "ana@acme.com"
 ```
 
-and use the colour classes for that number. Avatars follow the Apple look: one solid system colour with a soft sheen on top,
-so every avatar is `<colour> bg-gradient-to-b from-on-accent/25 to-transparent`:
+and use the colour for that number. Avatars match the widgets: a tinted glass circle in one plain colour with the
+initials in that same colour. Keep the template's size and layout classes and set the colour classes from this table:
 
-| n | colour class |
-| -- | -- |
-| 0 | `bg-danger` |
-| 1 | `bg-accent` |
-| 2 | `bg-success` |
-| 3 | `bg-warning` |
-| 4 | `bg-info` |
-| 5 | `bg-label-tertiary` |
+| n | colour | classes |
+| -- | -- | -- |
+| 0 | red | `bg-danger/20 text-danger ring-1 ring-inset ring-danger/30 backdrop-blur-md` |
+| 1 | blue | `bg-accent/20 text-accent ring-1 ring-inset ring-accent/30 backdrop-blur-md` |
+| 2 | green | `bg-success/20 text-success ring-1 ring-inset ring-success/30 backdrop-blur-md` |
+| 3 | amber | `bg-warning/20 text-warning ring-1 ring-inset ring-warning/30 backdrop-blur-md` |
+| 4 | teal | `bg-info/20 text-info ring-1 ring-inset ring-info/30 backdrop-blur-md` |
+| 5 | grey | `bg-label-tertiary/20 text-label-secondary ring-1 ring-inset ring-label-tertiary/30 backdrop-blur-md` |
+
+Overlapping avatars (a stack, `-ml-2 first:ml-0`) get a solid backing so they do not show through each other: replace the
+colour classes with `bg-backdrop bg-gradient-to-b from-<c>/20 to-<c>/20 text-<c> outline outline-2 outline-backdrop`,
+where `<c>` is the colour name from the table (`danger`, `accent`, `success`, `warning`, `info`, `label-tertiary`; the
+text of the grey one is `text-label-secondary`). Never use white initials or a solid-colour fill.
 
 Sizes: `size-[22px] text-2xs` for owners, `size-7 text-xs` for update rows, `size-9 text-md` for people lists and stacks, `size-10 text-xl` for the 1:1 header.
 Initials are the first letters of the first and last word of the name (else the first two letters of the email).
