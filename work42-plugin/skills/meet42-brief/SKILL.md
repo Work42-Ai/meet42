@@ -14,7 +14,7 @@ content, and **drop sections that have nothing real in them**. A short, accurate
 
 ## Pick the template
 
-The folder `templates/` next to this file has one template per kind of meeting, all sharing `templates/style.css`.
+The folder `templates/` next to this file has one template per kind of meeting, all built from the Work42 design kit (Tailwind classes, `wk-*` recipes and SF Symbols).
 Choose from what the event shows (title, recurrence, attendees, their email domains, the description). This is
 judgement, not a rule: if none clearly fits, use `general`.
 
@@ -45,32 +45,45 @@ The brief's eyebrow names its type ("Standup brief"); the summary stage uses the
 3. Build the artifact from the template. `D` is the folder this SKILL.md is in:
    ```bash
    D=<the folder this SKILL.md is in>
-   { echo '<style>'; cat "$D/templates/style.css"; echo '</style>'; cat "$D/templates/<type>.html"; } > /tmp/meeting-brief.html
+   cp "$D/templates/<type>.html" /tmp/meeting-brief.html
    ```
-   Edit `/tmp/meeting-brief.html`: replace every example with real content, remove the leading `<!-- … -->` guidance
-   comments, and set `--acc` on the `<div class="m" style="--acc:…">` wrapper to the event's `calendarColor` when it has
-   one. Then `work42 artifact set meeting-brief /tmp/meeting-brief.html --title "Meeting brief"` and
-   `work42 artifact status meeting-brief`, and fix any error it reports.
+   Edit `/tmp/meeting-brief.html`: replace every example with real content and remove the leading `<!-- … -->`
+   guidance comments. The page is plain Tailwind and kit markup; there is no stylesheet to add and no colour to set
+   (the accent follows the app). Then `work42 artifact set meeting-brief /tmp/meeting-brief.html --title "Meeting brief"`
+   and `work42 artifact status meeting-brief`, and fix anything it reports: `set` must print no lint findings.
 
 ## Avatars
 
-Guests and owners get a round initials avatar, `<span class="m-av g0">AS</span>` (add `sm` for a small one, `lg` for
-the 1:1 header). The colour class `g0` to `g5` must match what the widgets show for the same person: it comes from their
-email (else their name), lowercased, with FNV-1a modulo 6. Compute it with:
+Guests and owners get a round initials avatar. The templates show the exact markup; only the gradient depends on the
+person. Pick one of six gradients so it matches what the widgets show for the same person: it comes from their email
+(else their name), lowercased, with FNV-1a modulo 6. Compute the number with:
 
 ```bash
 python3 -c 'import sys;h=0xcbf29ce484222325;[h:=((h^b)*0x100000001b3)&0xFFFFFFFFFFFFFFFF for b in sys.argv[1].lower().encode()];print(h%6)' "ana@acme.com"
 ```
 
-and use `g` plus the number. Initials are the first letters of the first and last word of the name (else the first two
-letters of the email).
+and use the gradient classes for that number (put them after `bg-gradient-to-br`):
+
+| n | classes |
+| -- | -- |
+| 0 | `from-danger to-warning` |
+| 1 | `from-info to-accent` |
+| 2 | `from-success to-info` |
+| 3 | `from-accent to-danger` |
+| 4 | `from-caution to-warning` |
+| 5 | `from-label-tertiary to-label-secondary` |
+
+Sizes: `size-[22px] text-2xs` small (owners, updates), `size-[30px] text-sm` default, `size-10 text-xl` for the 1:1 header.
+Initials are the first letters of the first and last word of the name (else the first two letters of the email).
 
 ## Rules
 
 - **Every resource you mention is a direct link** (issue, pull request, document, thread, the meeting link). Never name
   something the user would have to search for.
-- Use only the classes in `templates/style.css`, `var(--w42-*)` tokens and inline SVG. No network requests, no external
-  scripts, fonts or images, and no tokens the theme doesn't define.
+- Style only with the Tailwind classes and `wk-*` recipes the templates use (see the `work42-artifact` skill for the full
+  vocabulary): semantic colours (`text-label`, `bg-card`, `text-success-ink`), the type scale (`text-md`, `text-lg`), and
+  `<i data-sf="…">` SF Symbols. Never a hex colour, a palette class (`bg-blue-500`, `text-white`) or an arbitrary font size.
+  No network requests, no external scripts, fonts or images.
 - Be specific: who is the user meeting, what is each person waiting on, what is the state of each item. No filler.
 - Never invent. If you could not find something, leave the section out or say it wasn't found.
 - Update the artifact (the same `work42 artifact set`) when the user asks you to rebuild it, including in another

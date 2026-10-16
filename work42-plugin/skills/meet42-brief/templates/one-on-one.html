@@ -1,25 +1,25 @@
-<!-- meet42 brief template, one-on-one. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. Sections: hero with the other person's large avatar (m-av lg), From last time (the commitments from the previous 1:1 summary, struck through with m-box done when done), Their recent work (from the session's sources), Talking points (tag You for yours, Ask for questions). Skip 'From last time' when there is no earlier summary. -->
-<div class="m" style="--acc:#0ea56b">
-<header class="m-hero" style="--acc:#0ea56b">
-  <div class="m-eyebrow">1:1 brief <span>· prepared 3:45 PM</span></div>
-  <div class="m-top"><span class="m-av lg g2">PR</span><h1 class="m-title">1:1 with Priya</h1><a class="m-join" href="https://meet.google.com/abc">Join</a></div>
-  <div class="m-meta"><span class="m-chip">Today · 4:00 – 4:30 PM</span><span class="m-chip">Every 2 weeks · last on Oct 2</span></div>
-  <div class="m-lead"><small>Worth covering</small>Priya shipped the <b>sync v2 spike</b> and now owns sync v2. One follow-up from last time is still open: <b>her conference talk</b>.</div>
+<!-- meet42 brief template, one-on-one. Fragment: push it as is; it is Tailwind plus the kit classes, so no stylesheet is needed. Replace every example with real content, drop any section with nothing real in it, never invent. Sections: hero with the other person's large avatar (size-10), From last time (the commitments from the previous 1:1 summary, struck through with a filled green box when done), Their recent work (from the session's sources), Talking points (tag You for yours, Ask for questions). Skip 'From last time' when there is no earlier summary. -->
+<div class="flex flex-col gap-4 text-base text-label">
+<header class="relative overflow-hidden rounded-card border border-separator border-l-[5px] border-l-success bg-card px-4 py-3 shadow-card">
+  <div class="text-xs font-bold uppercase tracking-[.09em] text-success-ink">1:1 brief <span class="font-semibold normal-case tracking-[.04em] text-label-tertiary">· prepared 3:45 PM</span></div>
+  <div class="mt-2 flex items-center gap-4"><span class="grid size-10 text-xl flex-none place-items-center rounded-full bg-gradient-to-br from-success to-info font-semibold text-on-accent shadow-sm">PR</span><h1 class="m-0 min-w-0 flex-1 text-2xl font-bold tracking-tight">1:1 with Priya</h1><a class="inline-flex items-center gap-1.5 rounded-full bg-success px-3.5 py-1.5 text-md font-semibold whitespace-nowrap text-on-accent" href="https://meet.google.com/abc">Join</a></div>
+  <div class="mt-2 flex flex-wrap gap-1.5"><span class="wk-badge is-gray gap-1.5 whitespace-nowrap">Today · 4:00 – 4:30 PM</span><span class="wk-badge is-gray gap-1.5 whitespace-nowrap">Every 2 weeks · last on Oct 2</span></div>
+  <div class="mt-3 border-t border-separator pt-3 text-lg leading-snug"><small class="mb-1 block text-2xs font-bold uppercase tracking-[.08em] text-label-tertiary">Worth covering</small>Priya shipped the <b>sync v2 spike</b> and now owns sync v2. One follow-up from last time is still open: <b>her conference talk</b>.</div>
 </header>
-<div class="m-cols">
-  <section><div class="m-h"><h3>From last time</h3><span>Oct 2</span></div><div class="m-card">
-    <div class="m-row"><span class="m-box done"></span><div class="m-grow"><s>You: share the Q4 plan draft</s></div></div>
-    <div class="m-row"><span class="m-box"></span><div class="m-grow">Priya: decide on the conference talk<div class="m-sub">Deadline for proposals is Oct 20</div></div></div>
+<div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-4">
+  <section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">From last time</h3><span class="text-sm text-label-tertiary">Oct 2</span></div><div class="divide-y divide-separator overflow-hidden rounded-card border border-separator bg-card">
+    <div class="flex items-start gap-3 px-3 py-2"><span class="mt-0.5 size-4 flex-none rounded-[5px] border-[1.5px] border-success bg-success"></span><div class="min-w-0 flex-1"><s>You: share the Q4 plan draft</s></div></div>
+    <div class="flex items-start gap-3 px-3 py-2"><span class="mt-0.5 size-4 flex-none rounded-[5px] border-[1.5px] border-label/30"></span><div class="min-w-0 flex-1">Priya: decide on the conference talk<div class="text-md text-label-secondary">Deadline for proposals is Oct 20</div></div></div>
   </div></section>
-  <section><div class="m-h"><h3>Her recent work</h3><span>Last 2 weeks</span></div><div class="m-card">
-    <div class="m-row"><span class="m-ic ok">✓</span><div class="m-grow">Merged <a href="https://example.com/pr/450">#450 Sync v2 spike</a></div></div>
-    <div class="m-row"><span class="m-ic ok">✓</span><div class="m-grow">Closed 5 issues incl. <a href="https://example.com/WOR-120">WOR-120</a></div></div>
-    <div class="m-row"><span class="m-ic q">→</span><div class="m-grow">Now owns <a href="https://example.com/WOR-112">WOR-112</a> sync v2</div></div>
+  <section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">Her recent work</h3><span class="text-sm text-label-tertiary">Last 2 weeks</span></div><div class="divide-y divide-separator overflow-hidden rounded-card border border-separator bg-card">
+    <div class="flex items-start gap-3 px-3 py-2"><span class="mt-px grid size-5 flex-none place-items-center rounded-full bg-success/15 text-sm font-extrabold text-success-ink">✓</span><div class="min-w-0 flex-1">Merged <a class="text-accent-ink hover:underline" href="https://example.com/pr/450">#450 Sync v2 spike</a></div></div>
+    <div class="flex items-start gap-3 px-3 py-2"><span class="mt-px grid size-5 flex-none place-items-center rounded-full bg-success/15 text-sm font-extrabold text-success-ink">✓</span><div class="min-w-0 flex-1">Closed 5 issues incl. <a class="text-accent-ink hover:underline" href="https://example.com/WOR-120">WOR-120</a></div></div>
+    <div class="flex items-start gap-3 px-3 py-2"><span class="mt-px grid size-5 flex-none place-items-center rounded-full bg-warning/15 text-sm font-extrabold text-warning-ink">→</span><div class="min-w-0 flex-1">Now owns <a class="text-accent-ink hover:underline" href="https://example.com/WOR-112">WOR-112</a> sync v2</div></div>
   </div></section>
 </div>
-<section><div class="m-h"><h3>Talking points</h3></div><div class="m-card">
-  <div class="m-row"><span class="m-tag">You</span><div class="m-grow">Recognise the spike: it unblocked the Q4 decision.</div></div>
-  <div class="m-row"><span class="m-tag">You</span><div class="m-grow">Does owning sync v2 leave room for the talk?</div></div>
-  <div class="m-row"><span class="m-tag n">Ask</span><div class="m-grow">Anything slowing her down this sprint?</div></div>
+<section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">Talking points</h3></div><div class="divide-y divide-separator overflow-hidden rounded-card border border-separator bg-card">
+  <div class="flex items-start gap-3 px-3 py-2"><span class="wk-badge is-success">You</span><div class="min-w-0 flex-1">Recognise the spike: it unblocked the Q4 decision.</div></div>
+  <div class="flex items-start gap-3 px-3 py-2"><span class="wk-badge is-success">You</span><div class="min-w-0 flex-1">Does owning sync v2 leave room for the talk?</div></div>
+  <div class="flex items-start gap-3 px-3 py-2"><span class="wk-badge is-gray">Ask</span><div class="min-w-0 flex-1">Anything slowing her down this sprint?</div></div>
 </div></section>
 </div>

@@ -1,25 +1,25 @@
-<!-- meet42 brief template, external. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. Sections: hero (what we want from the call), Them and Us (name, role tag, one useful note each), History (dated rows from mail, the calendar and earlier summaries, each linked), Watch out for (a quote block). Only include history you actually found. -->
-<div class="m" style="--acc:#e8770e">
-<header class="m-hero" style="--acc:#e8770e">
-  <div class="m-eyebrow">External call brief <span>· prepared 10:40 AM</span></div>
-  <div class="m-top"><h1 class="m-title">Work42 × Acme — pilot check-in</h1><a class="m-join" href="https://zoom.us/j/1">Join</a></div>
-  <div class="m-meta"><span class="m-chip">Today · 11:00 – 11:45 AM · Zoom</span><span class="m-chip">2 from Acme · 2 from us</span><span class="m-chip">acme.com</span></div>
-  <div class="m-lead"><small>What we want</small>Confirm the pilot <b>converts to a paid plan</b> in November, and hear what blocks a wider rollout.</div>
+<!-- meet42 brief template, external. Fragment: push it as is; it is Tailwind plus the kit classes, so no stylesheet is needed. Replace every example with real content, drop any section with nothing real in it, never invent. Sections: hero (what we want from the call), Them and Us (name, role tag, one useful note each), History (dated rows from mail, the calendar and earlier summaries, each linked), Watch out for (a quote block). Only include history you actually found. -->
+<div class="flex flex-col gap-4 text-base text-label">
+<header class="relative overflow-hidden rounded-card border border-separator border-l-[5px] border-l-warning bg-card px-4 py-3 shadow-card">
+  <div class="text-xs font-bold uppercase tracking-[.09em] text-warning-ink">External call brief <span class="font-semibold normal-case tracking-[.04em] text-label-tertiary">· prepared 10:40 AM</span></div>
+  <div class="mt-2 flex items-center gap-4"><h1 class="m-0 min-w-0 flex-1 text-2xl font-bold tracking-tight">Work42 × Acme — pilot check-in</h1><a class="inline-flex items-center gap-1.5 rounded-full bg-success px-3.5 py-1.5 text-md font-semibold whitespace-nowrap text-on-accent" href="https://zoom.us/j/1">Join</a></div>
+  <div class="mt-2 flex flex-wrap gap-1.5"><span class="wk-badge is-gray gap-1.5 whitespace-nowrap">Today · 11:00 – 11:45 AM · Zoom</span><span class="wk-badge is-gray gap-1.5 whitespace-nowrap">2 from Acme · 2 from us</span><span class="wk-badge is-gray gap-1.5 whitespace-nowrap">acme.com</span></div>
+  <div class="mt-3 border-t border-separator pt-3 text-lg leading-snug"><small class="mb-1 block text-2xs font-bold uppercase tracking-[.08em] text-label-tertiary">What we want</small>Confirm the pilot <b>converts to a paid plan</b> in November, and hear what blocks a wider rollout.</div>
 </header>
-<div class="m-cols">
-  <section><div class="m-h"><h3>Them</h3><span>Acme</span></div><div class="m-card">
-    <div class="m-row"><span class="m-av g3">JK</span><div class="m-grow"><b>Jordan Kim</b> <span class="m-tag n">VP Engineering</span><div class="m-sub">Sponsor; asked about SSO twice (<a href="https://example.com/mail1">email Oct 3</a>)</div></div></div>
-    <div class="m-row"><span class="m-av g5">RS</span><div class="m-grow"><b>Rita Souza</b> <span class="m-tag n">Security</span><div class="m-sub">First time on a call with us</div></div></div>
+<div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-4">
+  <section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">Them</h3><span class="text-sm text-label-tertiary">Acme</span></div><div class="divide-y divide-separator overflow-hidden rounded-card border border-separator bg-card">
+    <div class="flex items-start gap-3 px-3 py-2"><span class="grid size-[30px] text-sm flex-none place-items-center rounded-full bg-gradient-to-br from-accent to-danger font-semibold text-on-accent shadow-sm">JK</span><div class="min-w-0 flex-1"><b>Jordan Kim</b> <span class="wk-badge is-gray">VP Engineering</span><div class="text-md text-label-secondary">Sponsor; asked about SSO twice (<a class="text-accent-ink hover:underline" href="https://example.com/mail1">email Oct 3</a>)</div></div></div>
+    <div class="flex items-start gap-3 px-3 py-2"><span class="grid size-[30px] text-sm flex-none place-items-center rounded-full bg-gradient-to-br from-label-tertiary to-label-secondary font-semibold text-on-accent shadow-sm">RS</span><div class="min-w-0 flex-1"><b>Rita Souza</b> <span class="wk-badge is-gray">Security</span><div class="text-md text-label-secondary">First time on a call with us</div></div></div>
   </div></section>
-  <section><div class="m-h"><h3>Us</h3></div><div class="m-card">
-    <div class="m-row"><span class="m-av g0">AS</span><div class="m-grow"><b>Ana Silva</b><div class="m-sub">Runs the pilot</div></div></div>
-    <div class="m-row"><span class="m-av g4">YR</span><div class="m-grow"><b>You</b></div></div>
+  <section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">Us</h3></div><div class="divide-y divide-separator overflow-hidden rounded-card border border-separator bg-card">
+    <div class="flex items-start gap-3 px-3 py-2"><span class="grid size-[30px] text-sm flex-none place-items-center rounded-full bg-gradient-to-br from-danger to-warning font-semibold text-on-accent shadow-sm">AS</span><div class="min-w-0 flex-1"><b>Ana Silva</b><div class="text-md text-label-secondary">Runs the pilot</div></div></div>
+    <div class="flex items-start gap-3 px-3 py-2"><span class="grid size-[30px] text-sm flex-none place-items-center rounded-full bg-gradient-to-br from-caution to-warning font-semibold text-on-accent shadow-sm">YR</span><div class="min-w-0 flex-1"><b>You</b></div></div>
   </div></section>
 </div>
-<section><div class="m-h"><h3>History</h3><span>From your mail, calendar and earlier summaries</span></div><div class="m-card">
-  <div class="m-row"><span class="m-key">Sep 12</span><div class="m-grow">Kick-off · <a href="https://example.com/summary">summary</a>: 20 seats, 6-week pilot</div></div>
-  <div class="m-row"><span class="m-key">Oct 3</span><div class="m-grow">Jordan: "SSO is a must before rollout" · <a href="https://example.com/mail1">email</a></div></div>
-  <div class="m-row"><span class="m-key">Open</span><div class="m-grow"><a href="https://example.com/WOR-98">WOR-98</a> Enterprise SSO</div><span class="m-st st-bad">Blocked</span></div>
+<section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">History</h3><span class="text-sm text-label-tertiary">From your mail, calendar and earlier summaries</span></div><div class="divide-y divide-separator overflow-hidden rounded-card border border-separator bg-card">
+  <div class="flex items-start gap-3 px-3 py-2"><span class="min-w-[60px] pt-px font-mono text-sm text-label-tertiary">Sep 12</span><div class="min-w-0 flex-1">Kick-off · <a class="text-accent-ink hover:underline" href="https://example.com/summary">summary</a>: 20 seats, 6-week pilot</div></div>
+  <div class="flex items-start gap-3 px-3 py-2"><span class="min-w-[60px] pt-px font-mono text-sm text-label-tertiary">Oct 3</span><div class="min-w-0 flex-1">Jordan: "SSO is a must before rollout" · <a class="text-accent-ink hover:underline" href="https://example.com/mail1">email</a></div></div>
+  <div class="flex items-start gap-3 px-3 py-2"><span class="min-w-[60px] pt-px font-mono text-sm text-label-tertiary">Open</span><div class="min-w-0 flex-1"><a class="text-accent-ink hover:underline" href="https://example.com/WOR-98">WOR-98</a> Enterprise SSO</div><span class="wk-badge is-danger whitespace-nowrap">Blocked</span></div>
 </div></section>
-<section><div class="m-h"><h3>Watch out for</h3></div><blockquote class="m-quote">Rita is new and from Security: expect questions on data handling. Audio is transcribed on-device; nothing leaves the Mac.</blockquote></section>
+<section><div class="mb-2 flex items-baseline gap-2"><h3 class="m-0 text-lg font-bold tracking-tight">Watch out for</h3></div><blockquote class="m-0 rounded-r-[10px] border-l-[3px] border-warning bg-warning/5 px-4 py-3 text-md text-label-secondary">Rita is new and from Security: expect questions on data handling. Audio is transcribed on-device; nothing leaves the Mac.</blockquote></section>
 </div>
