@@ -54,10 +54,11 @@ private let meetingRecordingPurpleLight = Color(red: 0xC4 / 255, green: 0xB5 / 2
 /// or a system-event line (missing-`type` ⇒ speaker line, for back-compat)
 ///   { "ts", "type": "system_event", "event", "image"?, "app"?, "bundle_id"?,
 ///     "ocr_text"?, "rect": {x,y,width,height} }.
-enum RecordingLine: Identifiable {
+nonisolated enum RecordingLine: Identifiable, Sendable {
 
     struct SpeakerLine {
-        let id: UUID
+        /// Stable across re-reads: the line's `lineId`, else its timestamp and byte offset.
+        let id: String
         let ts: String
         let speaker: Speaker
         let text: String
@@ -72,7 +73,7 @@ enum RecordingLine: Identifiable {
     }
 
     struct SystemEventEntry {
-        let id: UUID
+        let id: String
         let ts: String
         let event: String
         let imagePath: String?
@@ -85,15 +86,17 @@ enum RecordingLine: Identifiable {
     case speaker(SpeakerLine)
     case systemEvent(SystemEventEntry)
 
-    var id: UUID {
+    var id: String {
         switch self {
         case .speaker(let l): return l.id
         case .systemEvent(let e): return e.id
         }
     }
 
-    /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`).
-    init?(jsonString: String) {
+    /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`). `byteOffset` is
+    /// where the line starts in the file; it names lines that carry no `lineId`, so a re-read of
+    /// the same bytes yields the same ids (a fresh `UUID()` per read made SwiftUI rebuild every row).
+    init?(jsonString: String, byteOffset: Int = 0) {
         guard let data = jsonString.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ts = obj["ts"] as? String else {
@@ -111,7 +114,7 @@ enum RecordingLine: Identifiable {
                 cgRect = CGRect(x: rx, y: ry, width: rw, height: rh)
             }
             self = .systemEvent(SystemEventEntry(
-                id: UUID(),
+                id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
                 event: event,
                 imagePath: obj["image"] as? String,
@@ -127,7 +130,7 @@ enum RecordingLine: Identifiable {
                 return nil
             }
             self = .speaker(SpeakerLine(
-                id: UUID(),
+                id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
                 speaker: SpeakerLine.Speaker(rawValue: speakerRaw) ?? .unknown,
                 text: text,
@@ -153,17 +156,6 @@ private func conversationPath(sessionDir: String) -> String {
 
 private func speakersPath(sessionDir: String) -> String {
     (sessionDir as NSString).appendingPathComponent("speakers.json")
-}
-
-/// Parse `conversation.jsonl` line by line; empty when missing/undecodable.
-private func parseConversation(sessionDir: String) -> [RecordingLine] {
-    guard let raw = try? String(contentsOfFile: conversationPath(sessionDir: sessionDir), encoding: .utf8) else {
-        return []
-    }
-    return raw
-        .components(separatedBy: "\n")
-        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        .compactMap { RecordingLine(jsonString: $0) }
 }
 
 /// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
@@ -334,14 +326,24 @@ private enum Meet42Trace {
     }
 }
 
+/// Shared formatters: allocating two `ISO8601DateFormatter`s per call was a per-row cost on every
+/// body pass. `ISO8601DateFormatter` is thread-safe for formatting once configured.
+private enum ISO8601Parsing {
+    nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) static let whole: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+}
+
 /// Parse an ISO 8601 timestamp, tolerating presence/absence of fractional secs.
 private func parseISO8601(_ ts: String) -> Date? {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: ts) { return d }
-    let f2 = ISO8601DateFormatter()
-    f2.formatOptions = [.withInternetDateTime]
-    return f2.date(from: ts)
+    ISO8601Parsing.fractional.date(from: ts) ?? ISO8601Parsing.whole.date(from: ts)
 }
 
 // MARK: - Recording truth (meet42 record status + the workflow-gate storage)
@@ -1318,7 +1320,8 @@ private struct RecordingTileView: View {
     let services: SessionServices
     @State private var eventState = TileEventHolder()
 
-    @State private var conversationWatcher = WidgetFileWatcher()
+    /// The transcript, read incrementally (only appended lines are parsed, off the main thread).
+    @State private var tail = TranscriptTail()
     @State private var speakersWatcher = WidgetFileWatcher()
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
@@ -1334,10 +1337,10 @@ private struct RecordingTileView: View {
     @State private var startError: (reason: String, message: String)?
 
     var body: some View {
-        // Register both watchers as dependencies so the body re-runs on change.
-        let _ = conversationWatcher.version
+        // `tail.lines` is observed, and the speakers watcher bumps its version, so the body re-runs
+        // when either the transcript or the speaker names change.
         let _ = speakersWatcher.version
-        let lines = recordingDir.map { parseConversation(sessionDir: $0) } ?? []
+        let lines = tail.lines
         let speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
 
         return Group {
@@ -1402,17 +1405,17 @@ private struct RecordingTileView: View {
         }
         .onChange(of: recordingDir) { _, newDir in
             guard let newDir else { return }
-            conversationWatcher.watch(conversationPath(sessionDir: newDir))
+            tail.start(path: conversationPath(sessionDir: newDir))
             speakersWatcher.watch(speakersPath(sessionDir: newDir))
         }
         .onAppear {
             if let recordingDir {
-                conversationWatcher.watch(conversationPath(sessionDir: recordingDir))
+                tail.start(path: conversationPath(sessionDir: recordingDir))
                 speakersWatcher.watch(speakersPath(sessionDir: recordingDir))
             }
         }
         .onDisappear {
-            conversationWatcher.stop()
+            tail.stop()
             speakersWatcher.stop()
         }
     }
