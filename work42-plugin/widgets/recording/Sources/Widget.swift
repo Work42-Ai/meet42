@@ -1454,7 +1454,9 @@ private struct RecordingTileView: View {
     private func transcript(lines: [RecordingLine], speakers: [String: ResolvedSpeaker]) -> some View {
         ConversationView(
             items: lines,
-            pageSize: 100,
+            // The tile opens on the newest 20 lines and each automatic older-page load adds 20, so
+            // a long meeting never lays out more than the reader has asked for.
+            pageSize: 20,
             resetKey: recordingDir ?? "",
             rowSpacing: 12,
             runSpacing: 4,
