@@ -1,20 +1,25 @@
-<!-- meet42 summary template, standup. Fragment: build the artifact as style.css inside <style>, then this file. Replace every example with real content, drop any section with nothing real in it, never invent. Set --acc on the wrapper below to the event's calendarColor (from `meet42 show --json`) when it has one. Sections: hero (TL;DR), Blockers and Follow-ups side by side (follow-ups have an owner), Updates (one line per person, in what they said). Names and facts come from the transcript only. -->
-<div class="m" style="--acc:#2563eb">
-<header class="m-hero" style="--glow:var(--w42-green)">
-  <div class="m-eyebrow">Standup summary <span>· written 9:46 AM</span></div>
-  <div class="m-top"><h1 class="m-title">Platform daily</h1><div class="m-stack"><span class="m-av g2">PR</span><span class="m-av g1">ML</span><span class="m-av g0">AS</span><span class="m-av g4">YR</span></div></div>
-  <div class="m-meta"><span class="m-chip">Today · 9:30 – 9:44 AM</span><span class="m-chip">14 min</span></div>
-  <div class="m-lead"><small>TL;DR</small>Sync v2 is on track for Friday. <b>Ana will unblock SSO</b> by booking the security review today.</div>
+<!-- meet42 summary template, standup. Fragment: push it as is; it is Tailwind plus the kit classes, so no stylesheet is needed. Replace every example with real content, drop any section with nothing real in it, never invent. Sections: hero (TL;DR), Blockers and Follow-ups side by side (follow-ups have an owner), Updates (one line per person, in what they said). Names and facts come from the transcript only. -->
+<div class="mx-auto flex max-w-3xl flex-col gap-8 px-2 py-4 text-base text-label">
+<header class="space-y-3">
+  <p class="text-xs font-semibold uppercase tracking-[.08em] text-success-ink">Standup summary <span class="font-normal normal-case tracking-normal text-label-tertiary">· written 9:46 AM</span></p>
+  <div class="flex items-start justify-between gap-4">
+    <div class="flex min-w-0 items-center gap-3"><h1 class="text-4xl font-semibold tracking-tight">Platform daily</h1></div>
+    <div class="flex"><span class="grid size-9 text-md shrink-0 place-items-center rounded-full bg-success bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent -ml-2 first:ml-0 ring-2 ring-backdrop">PR</span><span class="grid size-9 text-md shrink-0 place-items-center rounded-full bg-accent bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent -ml-2 first:ml-0 ring-2 ring-backdrop">ML</span><span class="grid size-9 text-md shrink-0 place-items-center rounded-full bg-danger bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent -ml-2 first:ml-0 ring-2 ring-backdrop">AS</span><span class="grid size-9 text-md shrink-0 place-items-center rounded-full bg-info bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent -ml-2 first:ml-0 ring-2 ring-backdrop">YR</span></div>
+  </div>
+  <p class="flex flex-wrap items-center gap-x-5 gap-y-1 text-md text-label-secondary"><span class="inline-flex items-center gap-1.5"><i data-sf="clock"></i>Today · 9:30 – 9:44 AM</span><span class="inline-flex items-center gap-1.5"><i data-sf="timer"></i>14 min</span></p>
+  <p class="max-w-2xl text-xl leading-snug text-label-secondary"><span class="mb-1 block text-xs font-semibold uppercase tracking-[.08em] text-label-tertiary">TL;DR</span>Sync v2 is on track for Friday. <b class="font-semibold">Ana will unblock SSO</b> by booking the security review today.</p>
 </header>
-<div class="m-cols">
-  <section><div class="m-h"><h3>Blockers</h3></div><div class="m-card"><div class="m-row"><span class="m-ic bad">!</span><div class="m-grow">SSO waiting on the security review<div class="m-sub"><b>Ana</b> books it today · <a href="https://example.com/WOR-98">WOR-98</a></div></div></div></div></section>
-  <section><div class="m-h"><h3>Follow-ups</h3></div><div class="m-card"><div class="m-row"><span class="m-box"></span><div class="m-grow">Review <a href="https://example.com/pr/455">#455</a></div><span class="m-own"><span class="m-av sm g2">PR</span>Priya</span></div><div class="m-row"><span class="m-box"></span><div class="m-grow">Book the security review</div><span class="m-own"><span class="m-av sm g0">AS</span>Ana</span></div></div></section>
-</div>
-<section><div class="m-h"><h3>Updates</h3><span>As each person said them</span></div>
-  <div class="m-card">
-    <div class="m-row"><span class="m-av sm g2">PR</span><div class="m-grow"><b>Priya</b> — spike merged; conflict resolution next, aiming for Friday.</div></div>
-    <div class="m-row"><span class="m-av sm g1">ML</span><div class="m-grow"><b>Marcus</b> — reviewed onboarding v2; can't start SSO until the review is booked.</div></div>
-    <div class="m-row"><span class="m-av sm g0">AS</span><div class="m-grow"><b>Ana</b> — onboarding v2 shipped; billing emails need a reviewer.</div></div>
-    <div class="m-row"><span class="m-av sm g4">YR</span><div class="m-grow"><b>You</b> — WOR-65 in review; starting the meeting templates.</div></div>
-  </div></section>
+
+<div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-8"><section class="space-y-3">
+  <h2 class="text-lg font-semibold">Blockers</h2>
+  <ul class="divide-y divide-separator"><li class="flex items-start gap-3 py-2.5"><i data-sf="exclamationmark.circle.fill" class="mt-0.5 text-xl text-danger"></i><div class="min-w-0 flex-1">SSO waiting on the security review<p class="text-md text-label-secondary"><b class="font-semibold">Ana</b> books it today · <a class="text-accent-ink hover:underline" href="https://example.com/WOR-98">WOR-98</a></p></div></li></ul>
+</section><section class="space-y-3">
+  <h2 class="text-lg font-semibold">Follow-ups</h2>
+  <div class="wk-card divide-y divide-separator"><div class="flex items-start gap-3 px-4 py-2.5"><span class="mt-0.5 size-4 shrink-0 rounded-[5px] border-[1.5px] border-label/30"></span><div class="min-w-0 flex-1">Review <a class="text-accent-ink hover:underline" href="https://example.com/pr/455">#455</a></div><span class="flex items-center gap-2 whitespace-nowrap text-md font-semibold"><span class="grid size-[22px] text-2xs shrink-0 place-items-center rounded-full bg-success bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent">PR</span>Priya</span></div><div class="flex items-start gap-3 px-4 py-2.5"><span class="mt-0.5 size-4 shrink-0 rounded-[5px] border-[1.5px] border-label/30"></span><div class="min-w-0 flex-1">Book the security review</div><span class="flex items-center gap-2 whitespace-nowrap text-md font-semibold"><span class="grid size-[22px] text-2xs shrink-0 place-items-center rounded-full bg-danger bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent">AS</span>Ana</span></div></div>
+</section></div>
+
+<section class="space-y-3">
+  <h2 class="text-lg font-semibold">Updates <span class="text-md font-normal text-label-tertiary">As each person said them</span></h2>
+  <ul class="divide-y divide-separator"><li class="flex items-start gap-3 py-2.5"><span class="grid size-7 text-xs shrink-0 place-items-center rounded-full bg-success bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent">PR</span><div class="min-w-0 flex-1"><b class="font-semibold">Priya</b> — spike merged; conflict resolution next, aiming for Friday.</div></li><li class="flex items-start gap-3 py-2.5"><span class="grid size-7 text-xs shrink-0 place-items-center rounded-full bg-accent bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent">ML</span><div class="min-w-0 flex-1"><b class="font-semibold">Marcus</b> — reviewed onboarding v2; can't start SSO until the review is booked.</div></li><li class="flex items-start gap-3 py-2.5"><span class="grid size-7 text-xs shrink-0 place-items-center rounded-full bg-danger bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent">AS</span><div class="min-w-0 flex-1"><b class="font-semibold">Ana</b> — onboarding v2 shipped; billing emails need a reviewer.</div></li><li class="flex items-start gap-3 py-2.5"><span class="grid size-7 text-xs shrink-0 place-items-center rounded-full bg-info bg-gradient-to-b from-on-accent/25 to-transparent font-semibold text-on-accent">YR</span><div class="min-w-0 flex-1"><b class="font-semibold">You</b> — WOR-65 in review; starting the meeting templates.</div></li></ul>
+</section>
 </div>

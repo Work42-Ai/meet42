@@ -10,7 +10,7 @@ description: |
 
 The **Summary** widget shows one session artifact, `meeting-summary`, in the same visual family as the brief. The
 folder `templates/` next to this file has one template per kind of meeting (`general`, `standup`, `refinement`,
-`one-on-one`, `external`) and the shared `templates/style.css`.
+`one-on-one`, `external`) built from the Work42 design kit (Tailwind classes, `wk-*` recipes and SF Symbols).
 
 ## Steps
 
@@ -30,25 +30,39 @@ folder `templates/` next to this file has one template per kind of meeting (`gen
 4. Build the artifact. `D` is the folder this SKILL.md is in:
    ```bash
    D=<the folder this SKILL.md is in>
-   { echo '<style>'; cat "$D/templates/style.css"; echo '</style>'; cat "$D/templates/<type>.html"; } > /tmp/meeting-summary.html
+   cp "$D/templates/<type>.html" /tmp/meeting-summary.html
    ```
    Edit `/tmp/meeting-summary.html`: replace every example with real content, drop sections with nothing real in them,
-   remove the leading guidance comment, and use the same `--acc` on the `<div class="m">` wrapper as the brief. Then
+   and remove the leading guidance comment. There is no stylesheet to add and no colour to set. Then
    `work42 artifact set meeting-summary /tmp/meeting-summary.html --title "Meeting summary"` and
-   `work42 artifact status meeting-summary`, and fix any error it reports.
+   `work42 artifact status meeting-summary`, and fix anything it reports: `set` must print no lint findings.
 5. Count the action items you listed (N) and run `work42 storage set meeting/summary '{"artifact":"meeting-summary","action_items":N}'`,
    then `work42 transition "Done"`.
 
 ## Avatars
 
-Use `<span class="m-av g0">AS</span>` (`sm` for small). The colour class must match the widgets: FNV-1a over the
-person's email (else name), lowercased, modulo 6:
+Owners and speakers get a round initials avatar. The templates show the exact markup; only the colour depends on the
+person. It must match the widgets: it comes from their email
+(else their name), lowercased, with FNV-1a modulo 6. Compute the number with:
 
 ```bash
 python3 -c 'import sys;h=0xcbf29ce484222325;[h:=((h^b)*0x100000001b3)&0xFFFFFFFFFFFFFFFF for b in sys.argv[1].lower().encode()];print(h%6)' "ana@acme.com"
 ```
 
-Use `g` plus the number. Initials are the first letters of the first and last word of the name.
+and use the colour classes for that number. Avatars follow the Apple look: one solid system colour with a soft sheen on top,
+so every avatar is `<colour> bg-gradient-to-b from-on-accent/25 to-transparent`:
+
+| n | colour class |
+| -- | -- |
+| 0 | `bg-danger` |
+| 1 | `bg-accent` |
+| 2 | `bg-success` |
+| 3 | `bg-warning` |
+| 4 | `bg-info` |
+| 5 | `bg-label-tertiary` |
+
+Sizes: `size-[22px] text-2xs` for owners, `size-7 text-xs` for update rows, `size-9 text-md` for people lists and stacks, `size-10 text-xl` for the 1:1 header.
+Initials are the first letters of the first and last word of the name (else the first two letters of the email).
 
 ## Rules
 
@@ -58,5 +72,6 @@ Use `g` plus the number. Initials are the first letters of the first and last wo
   as something to do.
 - Never invent: if something is unclear or missing from the transcript, say so (for example under Open questions). Times
   come from the transcript, never from memory.
-- Use only the classes in `templates/style.css`, `var(--w42-*)` tokens and inline SVG; no network requests, no external
-  scripts, fonts or images.
+- Style only with the Tailwind classes and `wk-*` recipes the templates use (see the `work42-artifact` skill): semantic
+  colours, the type scale and `<i data-sf="…">` SF Symbols; never a hex colour, a palette class or an arbitrary font size.
+  No network requests, no external scripts, fonts or images.
