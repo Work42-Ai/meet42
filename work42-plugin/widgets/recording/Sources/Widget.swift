@@ -54,10 +54,11 @@ private let meetingRecordingPurpleLight = Color(red: 0xC4 / 255, green: 0xB5 / 2
 /// or a system-event line (missing-`type` ⇒ speaker line, for back-compat)
 ///   { "ts", "type": "system_event", "event", "image"?, "app"?, "bundle_id"?,
 ///     "ocr_text"?, "rect": {x,y,width,height} }.
-enum RecordingLine: Identifiable {
+nonisolated enum RecordingLine: Identifiable, Sendable {
 
     struct SpeakerLine {
-        let id: UUID
+        /// Stable across re-reads: the line's `lineId`, else its timestamp and byte offset.
+        let id: String
         let ts: String
         let speaker: Speaker
         let text: String
@@ -72,7 +73,7 @@ enum RecordingLine: Identifiable {
     }
 
     struct SystemEventEntry {
-        let id: UUID
+        let id: String
         let ts: String
         let event: String
         let imagePath: String?
@@ -85,15 +86,25 @@ enum RecordingLine: Identifiable {
     case speaker(SpeakerLine)
     case systemEvent(SystemEventEntry)
 
-    var id: UUID {
+    var id: String {
         switch self {
         case .speaker(let l): return l.id
         case .systemEvent(let e): return e.id
         }
     }
 
-    /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`).
-    init?(jsonString: String) {
+    /// The line's ISO 8601 timestamp, whichever kind it is.
+    var ts: String {
+        switch self {
+        case .speaker(let l): return l.ts
+        case .systemEvent(let e): return e.ts
+        }
+    }
+
+    /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`). `byteOffset` is
+    /// where the line starts in the file; it names lines that carry no `lineId`, so a re-read of
+    /// the same bytes yields the same ids (a fresh `UUID()` per read made SwiftUI rebuild every row).
+    init?(jsonString: String, byteOffset: Int = 0) {
         guard let data = jsonString.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ts = obj["ts"] as? String else {
@@ -111,7 +122,7 @@ enum RecordingLine: Identifiable {
                 cgRect = CGRect(x: rx, y: ry, width: rw, height: rh)
             }
             self = .systemEvent(SystemEventEntry(
-                id: UUID(),
+                id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
                 event: event,
                 imagePath: obj["image"] as? String,
@@ -127,7 +138,7 @@ enum RecordingLine: Identifiable {
                 return nil
             }
             self = .speaker(SpeakerLine(
-                id: UUID(),
+                id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
                 speaker: SpeakerLine.Speaker(rawValue: speakerRaw) ?? .unknown,
                 text: text,
@@ -153,17 +164,6 @@ private func conversationPath(sessionDir: String) -> String {
 
 private func speakersPath(sessionDir: String) -> String {
     (sessionDir as NSString).appendingPathComponent("speakers.json")
-}
-
-/// Parse `conversation.jsonl` line by line; empty when missing/undecodable.
-private func parseConversation(sessionDir: String) -> [RecordingLine] {
-    guard let raw = try? String(contentsOfFile: conversationPath(sessionDir: sessionDir), encoding: .utf8) else {
-        return []
-    }
-    return raw
-        .components(separatedBy: "\n")
-        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        .compactMap { RecordingLine(jsonString: $0) }
 }
 
 /// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
@@ -334,14 +334,24 @@ private enum Meet42Trace {
     }
 }
 
+/// Shared formatters: allocating two `ISO8601DateFormatter`s per call was a per-row cost on every
+/// body pass. `ISO8601DateFormatter` is thread-safe for formatting once configured.
+private enum ISO8601Parsing {
+    nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) static let whole: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+}
+
 /// Parse an ISO 8601 timestamp, tolerating presence/absence of fractional secs.
 private func parseISO8601(_ ts: String) -> Date? {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: ts) { return d }
-    let f2 = ISO8601DateFormatter()
-    f2.formatOptions = [.withInternetDateTime]
-    return f2.date(from: ts)
+    ISO8601Parsing.fractional.date(from: ts) ?? ISO8601Parsing.whole.date(from: ts)
 }
 
 // MARK: - Recording truth (meet42 record status + the workflow-gate storage)
@@ -1264,7 +1274,7 @@ struct TranscriptIdentity {
     let name: String
     let initials: String
     let key: String
-    let gradient: (Color, Color)?
+    let color: Color?
     let muted: Bool
 
     static func resolve(
@@ -1275,27 +1285,27 @@ struct TranscriptIdentity {
             if let me {
                 return TranscriptIdentity(
                     name: "You", initials: MeetAvatar.initials(name: me.name, email: me.email),
-                    key: MeetAvatar.key(name: me.name, email: me.email), gradient: nil, muted: false
+                    key: MeetAvatar.key(name: me.name, email: me.email), color: nil, muted: false
                 )
             }
-            return TranscriptIdentity(name: "You", initials: "Y", key: "you", gradient: MeetAvatar.palette[4], muted: false)
+            return TranscriptIdentity(name: "You", initials: "Y", key: "you", color: MeetAvatar.palette[4], muted: false)
         case .them:
             let label = line.speakerLabel ?? "Them"
             if let matched = speakers[label] ?? speakers["Them"] ?? speakers["them"] {
                 return TranscriptIdentity(
                     name: matched.name, initials: MeetAvatar.initials(name: matched.name, email: matched.email),
-                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), gradient: nil, muted: false
+                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), color: nil, muted: false
                 )
             }
             if label.hasPrefix("Speaker "), let n = Int(label.dropFirst("Speaker ".count)) {
                 return TranscriptIdentity(
                     name: label, initials: "S\(n)", key: label,
-                    gradient: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
+                    color: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
                 )
             }
-            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", gradient: MeetAvatar.palette[5], muted: true)
+            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", color: MeetAvatar.palette[5], muted: true)
         case .unknown:
-            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", gradient: MeetAvatar.palette[5], muted: true)
+            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", color: MeetAvatar.palette[5], muted: true)
         }
     }
 }
@@ -1318,7 +1328,11 @@ private struct RecordingTileView: View {
     let services: SessionServices
     @State private var eventState = TileEventHolder()
 
-    @State private var conversationWatcher = WidgetFileWatcher()
+    /// The transcript, read incrementally (only appended lines are parsed, off the main thread).
+    @State private var tail = TranscriptTail()
+    /// The signed-in account (name and profile photo) for my own lines; nil until read, or when
+    /// signed out, in which case my avatar falls back to initials.
+    @State private var account: WidgetAccountUser?
     @State private var speakersWatcher = WidgetFileWatcher()
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
@@ -1334,35 +1348,17 @@ private struct RecordingTileView: View {
     @State private var startError: (reason: String, message: String)?
 
     var body: some View {
-        // Register both watchers as dependencies so the body re-runs on change.
-        let _ = conversationWatcher.version
+        // `tail.lines` is observed, and the speakers watcher bumps its version, so the body re-runs
+        // when either the transcript or the speaker names change.
         let _ = speakersWatcher.version
-        let lines = recordingDir.map { parseConversation(sessionDir: $0) } ?? []
+        let lines = tail.lines
         let speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
 
         return Group {
             if lines.isEmpty {
                 emptyState
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(lines) { line in
-                                recordingBubble(for: line, speakers: speakers)
-                                    .id(line.id)
-                            }
-                        }
-                        .padding(.horizontal, DT.s12)
-                        .padding(.vertical, DT.s8)
-                    }
-                    .onChange(of: lines.count) { _, _ in
-                        if let last = lines.last {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
+                transcript(lines: lines, speakers: speakers)
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -1373,6 +1369,7 @@ private struct RecordingTileView: View {
                 if case .loaded(let event) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
                     eventState.currentUser = event.attendees.first(where: { $0.isCurrentUser })
                 }
+                account = await services.account?.currentUser()
                 try? await Task.sleep(for: .seconds(60))
             }
         }
@@ -1402,17 +1399,17 @@ private struct RecordingTileView: View {
         }
         .onChange(of: recordingDir) { _, newDir in
             guard let newDir else { return }
-            conversationWatcher.watch(conversationPath(sessionDir: newDir))
+            tail.start(path: conversationPath(sessionDir: newDir))
             speakersWatcher.watch(speakersPath(sessionDir: newDir))
         }
         .onAppear {
             if let recordingDir {
-                conversationWatcher.watch(conversationPath(sessionDir: recordingDir))
+                tail.start(path: conversationPath(sessionDir: recordingDir))
                 speakersWatcher.watch(speakersPath(sessionDir: recordingDir))
             }
         }
         .onDisappear {
-            conversationWatcher.stop()
+            tail.stop()
             speakersWatcher.stop()
         }
     }
@@ -1451,45 +1448,65 @@ private struct RecordingTileView: View {
         .padding(.top, DT.s8)
     }
 
-    @ViewBuilder
-    private func recordingBubble(
-        for line: RecordingLine,
-        speakers: [String: ResolvedSpeaker]
-    ) -> some View {
-        switch line {
-        case .speaker(let s): speakerBubble(for: s, speakers: speakers)
-        case .systemEvent(let e): systemEventCard(for: e)
+    /// Windowing, bottom pinning, automatic older-page loading and the "Jump to latest" pill come
+    /// from the shared `ConversationView` (Work42UI), the same component as the agent chat.
+    /// `lines` only ever grows by the appended lines (`TranscriptTail`).
+    private func transcript(lines: [RecordingLine], speakers: [String: ResolvedSpeaker]) -> some View {
+        ConversationView(
+            items: lines,
+            // The tile opens on the newest 20 lines and each automatic older-page load adds 20, so
+            // a long meeting never lays out more than the reader has asked for.
+            pageSize: 20,
+            resetKey: recordingDir ?? "",
+            rowSpacing: 12,
+            runSpacing: 4,
+            // A transcript is about who said what: every run is labeled, mine included, even 1:1.
+            labels: .always,
+            dividerLabel: ConversationDateDivider.clockLabel(for:),
+            actor: { conversationActor(for: $0, speakers: speakers) },
+            date: { parseISO8601($0.ts) }
+        ) { line, context in
+            recordingRow(for: line, context: context)
         }
     }
 
-    /// One transcript line: the shared People-style avatar, the speaker's name and time, and the text.
-    /// You = the current user (from the linked event, else "Y"); `Speaker N` = a numbered avatar with a stable
-    /// colour; `Them` = grey; a speaker the agent matched in speakers.json = that person's name and People avatar.
+    /// The conversation actor for a transcript line. System events belong to no one, so they
+    /// neither count towards "three or more speakers" nor break a speaker's run.
+    private func conversationActor(for line: RecordingLine, speakers: [String: ResolvedSpeaker]) -> ConversationActor? {
+        guard case .speaker(let spoken) = line else { return nil }
+        let who = TranscriptIdentity.resolve(line: spoken, speakers: speakers, me: eventState.currentUser)
+        let color = who.color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: who.key)]
+        guard spoken.speaker == .you else {
+            return ConversationActor(id: who.key, name: who.name, initials: who.initials, color: color, isMe: false)
+        }
+        // My own lines: my account's profile photo when signed in with one, else my initials.
+        let initials = account.map { MeetAvatar.initials(name: $0.displayName, email: $0.email) } ?? who.initials
+        return ConversationActor(
+            id: who.key, name: who.name, initials: initials.isEmpty || initials == "?" ? who.initials : initials,
+            // My bubble is the accent colour, so my label and avatar ring are too.
+            color: DT.systemAccent, isMe: true, imageURL: account?.photoURL
+        )
+    }
+
+    /// One row: a speaker line in a chat bubble (you trailing in the accent, others leading; with three
+    /// or more speakers a run's first line carries the glass avatar, name and time), or a centred
+    /// system-event card.
     @ViewBuilder
-    private func speakerBubble(
-        for line: RecordingLine.SpeakerLine,
-        speakers: [String: ResolvedSpeaker]
-    ) -> some View {
-        let who = TranscriptIdentity.resolve(line: line, speakers: speakers, me: eventState.currentUser)
-        HStack(alignment: .top, spacing: DT.s8) {
-            MeetAvatarView(initials: who.initials, key: who.key, size: 26, gradient: who.gradient)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(who.name)
-                        .font(.system(size: DT.f11, weight: .semibold))
-                        .foregroundStyle(who.muted ? DT.textSecondary : DT.textPrimary)
-                    if let date = parseISO8601(line.ts) {
-                        Text(date, style: .time).font(.system(size: DT.f10)).foregroundStyle(DT.textTertiary)
-                    }
-                }
-                Text(line.text)
-                    .font(.system(size: DT.f12))
+    private func recordingRow(for line: RecordingLine, context: ConversationRowContext) -> some View {
+        switch line {
+        case .speaker(let spoken):
+            ConversationBubble(context: context) {
+                Text(spoken.text)
+                    .font(.system(size: 16))
+                    .lineSpacing(5)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
             }
-            Spacer(minLength: 0)
+        case .systemEvent(let event):
+            systemEventCard(for: event)
         }
-        .padding(.vertical, 2)
     }
 
     /// A system-event entry as a CENTERED, visually distinct card. The image

@@ -1,5 +1,6 @@
+manifest_version: 2
 name: meet42
-version: 1
+version: 1.1.0
 description: >
   The meeting vertical, extracted from work42 into a first-party plugin
   (meet42-plugin-conversion, M2). Provides the `meeting` workflow (Prepare for
@@ -14,6 +15,7 @@ description: >
   work lives in the standalone meet42 tool (github.com/Work42-Ai/meet42), which this
   plugin's skills install from its signed releases; this plugin is UI + orchestration.
 author: work42
-sdk_version: 12
+sdk_version: 2.6.0
+sdk_abi: 12
 requires: []
 global_skills: meet42-setup

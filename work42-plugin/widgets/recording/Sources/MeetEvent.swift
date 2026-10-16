@@ -216,13 +216,15 @@ extension MeetEvent {
 /// (else their name), so they look the same in every widget.
 enum MeetAvatar {
 
-    static let palette: [(Color, Color)] = [
-        (Color(red: 1.00, green: 0.48, blue: 0.35), Color(red: 1.00, green: 0.24, blue: 0.43)),
-        (Color(red: 0.31, green: 0.67, blue: 1.00), Color(red: 0.15, green: 0.39, blue: 0.92)),
-        (Color(red: 0.26, green: 0.91, blue: 0.48), Color(red: 0.05, green: 0.65, blue: 0.42)),
-        (Color(red: 0.69, green: 0.42, blue: 1.00), Color(red: 0.43, green: 0.16, blue: 0.85)),
-        (Color(red: 0.97, green: 0.72, blue: 0.20), Color(red: 0.91, green: 0.47, blue: 0.06)),
-        (Color(red: 0.56, green: 0.62, blue: 0.67), Color(red: 0.36, green: 0.40, blue: 0.44)),
+    /// One plain colour per slot: the glass is tinted with it and the initials are drawn in it.
+    /// (Each is the deeper stop of the gradient pair the avatars used before WOR-235.)
+    static let palette: [Color] = [
+        Color(red: 1.00, green: 0.24, blue: 0.43),
+        Color(red: 0.15, green: 0.39, blue: 0.92),
+        Color(red: 0.05, green: 0.65, blue: 0.42),
+        Color(red: 0.43, green: 0.16, blue: 0.85),
+        Color(red: 0.91, green: 0.47, blue: 0.06),
+        Color(red: 0.36, green: 0.40, blue: 0.44),
     ]
 
     /// FNV-1a over the lowercased key, mod the palette size: stable across launches (unlike `hashValue`).
@@ -247,22 +249,25 @@ enum MeetAvatar {
     }
 }
 
-/// A circular gradient avatar with initials; `gradient` overrides the palette (used for You, Speaker N and Them).
+/// The one avatar look: a liquid-glass circle tinted with a single plain colour, initials in that
+/// colour (`GlassAvatar` in Work42UI, shared with the chat). `color` overrides the person's palette
+/// colour (used for You, Speaker N and Them). `stacked` backs the glass with a solid disc so
+/// overlapping avatars stay distinguishable.
 struct MeetAvatarView: View {
     let initials: String
     let key: String
     var size: CGFloat = 30
-    var gradient: (Color, Color)?
+    var color: Color?
+    var stacked = false
 
     var body: some View {
-        let colors = gradient ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: key)]
-        Text(initials)
-            .font(.system(size: size * 0.38, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(width: size, height: size)
-            .background(Circle().fill(LinearGradient(colors: [colors.0, colors.1], startPoint: .topLeading, endPoint: .bottomTrailing)))
-            .overlay(Circle().strokeBorder(Color.white.opacity(0.65), lineWidth: 1.5))
-            .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+        let tint = color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: key)]
+        GlassAvatar(initials: initials, color: tint, size: size)
+            .background {
+                if stacked {
+                    Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(-2)
+                }
+            }
     }
 }
 
