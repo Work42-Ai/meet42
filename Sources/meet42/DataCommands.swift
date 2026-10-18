@@ -132,7 +132,9 @@ enum DataCommands {
     static func linkSession(args: [String]) {
         let pos = CLI.positionals(args)
         guard pos.count >= 2 else {
-            CLI.fail("meet42 link-session: usage: link-session <eventId> <sessionId> [--session-dir <dir>]")
+            CLI.fail(
+                "meet42 link-session: usage: link-session <eventId> <sessionId> [--session-dir <dir>]"
+            )
         }
         let eventId = pos[0]
         let sessionId = pos[1]
@@ -208,13 +210,17 @@ enum DataCommands {
         // positionals: ["set", <calendar|event>, <id>, <mode>]
         let pos = CLI.positionals(args)
         guard pos.count >= 4 else {
-            CLI.fail("meet42 modes set: usage: modes set <calendar|event> <id> <view_only|assisted|ai_scheduled>")
+            CLI.fail(
+                "meet42 modes set: usage: modes set <calendar|event> <id> <view_only|assisted|ai_scheduled>"
+            )
         }
         let scope = pos[1]
         let id = pos[2]
         let modeRaw = pos[3]
         guard let mode = CalendarStore.CalendarMode(rawValue: modeRaw) else {
-            CLI.fail("meet42 modes set: unknown mode '\(modeRaw)'. Use view_only, assisted, or ai_scheduled.")
+            CLI.fail(
+                "meet42 modes set: unknown mode '\(modeRaw)'. Use view_only, assisted, or ai_scheduled."
+            )
         }
         let store = ModesStore()
         do {
