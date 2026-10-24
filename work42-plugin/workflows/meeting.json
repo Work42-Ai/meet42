@@ -289,44 +289,44 @@
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 storage get",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_get",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 storage list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_list",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 transitions list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__workflow_status",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 transition",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__transition",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_list",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact status",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_status",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact url",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_url",
       "action": "allow"
     },
     {
@@ -337,14 +337,14 @@
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__*",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 widget",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__widget_*",
       "action": "allow"
     },
     {
@@ -613,44 +613,44 @@
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 storage get",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_get",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 storage list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_list",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 transitions list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__workflow_status",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 transition",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__transition",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_list",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact status",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_status",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact url",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_url",
       "action": "allow"
     },
     {
@@ -661,14 +661,14 @@
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__*",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 widget",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__widget_*",
       "action": "allow"
     },
     {
@@ -871,44 +871,44 @@
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 storage get",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_get",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 storage list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_list",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 transitions list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__workflow_status",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 transition",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__transition",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_list",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact status",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_status",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact url",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_url",
       "action": "allow"
     },
     {
@@ -919,14 +919,14 @@
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__*",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 widget",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__widget_*",
       "action": "allow"
     },
     {
@@ -1129,44 +1129,44 @@
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 storage get",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_get",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 storage list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__storage_list",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 transitions list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__workflow_status",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 transition",
+      "kind": "mcp",
+      "pattern": "mcp__work42-session__transition",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 artifact list",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_list",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 artifact status",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_status",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 artifact url",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_url",
       "action": "allow"
     },
     {
@@ -1177,74 +1177,74 @@
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact set",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_set",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact path",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_assets_path",
       "action": "allow"
     },
     {
       "stage": "Prepare for Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact remove",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_remove",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact set",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_set",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact path",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_assets_path",
       "action": "allow"
     },
     {
       "stage": "In Meeting",
-      "kind": "execute",
-      "pattern": "work42 artifact remove",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_remove",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact set",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_set",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact path",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_assets_path",
       "action": "allow"
     },
     {
       "stage": "Summary",
-      "kind": "execute",
-      "pattern": "work42 artifact remove",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_remove",
       "action": "allow"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 artifact set",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_set",
       "action": "block"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 artifact path",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_assets_path",
       "action": "block"
     },
     {
       "stage": "Done",
-      "kind": "execute",
-      "pattern": "work42 artifact remove",
+      "kind": "mcp",
+      "pattern": "mcp__work42-artifact__artifact_remove",
       "action": "block"
     }
   ]
