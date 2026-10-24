@@ -1575,7 +1575,7 @@ private struct CalendarPreferenceRow: View {
 //       the one-way handoff.
 //   (c) Reconciler — every ~30s reads assisted events (`meet42 modes get --json`
 //       + `meet42 list --json`) and syncs them into work42's generic scheduler
-//       (`work42 schedule add/cancel --key mtg:<id>`) at T-15min. Unchanged by
+//       (`schedule_add/schedule_cancel --key mtg:<id>`) at T-15min. Unchanged by
 //       the detection rework.
 //
 // Only ONE agent instance (across every alive session) does this work — see

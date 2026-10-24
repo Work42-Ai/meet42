@@ -32,7 +32,7 @@ line), and lets you set the AI assist mode per calendar and per event.
   Starting launches an app-owned recorder, keeps the same 412x108 shared pill
   shell and meeting identity while its lower row reports setup progress, then
   seeds an existing prepared event session or runs
-  `work42 session start --background` for a new one.
+  `session_start` for a new one.
 - **Handoff metadata:** Calendar writes `meeting/recording_dir`,
   `meeting/started_at`, `meeting/title` (the stable session name), `meeting/source_app`, and
   `meeting/source_bundle_id`. Matched events also receive

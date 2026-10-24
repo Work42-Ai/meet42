@@ -8,7 +8,7 @@
 // status check) ask "is a recording active, and where does it live?".
 //
 // Session-agnostic (meet42-recording-lifecycle-rework, s1): a recording is
-// identified by its OWN recordingId + dir, never a work42 session id. The
+// identified by its OWN recordingId + dir, never a Work42 session id. The
 // session (if any) merely points at a recording via a storage pointer
 // (meeting/recording_dir) seeded at mint — it is never consulted here.
 //

@@ -49,7 +49,7 @@ public final class Meet42CalendarSync {
     private let store: CalendarStore
     private let eventStore: EKEventStore
     /// Invoked after every successful sync (e.g. to trigger the scheduler
-    /// reconcile into work42 via `work42 schedule`).
+    /// reconcile into work42 via the schedule tools).
     public var onSyncCompleted: (() -> Void)?
 
     private var changeObserver: (any NSObjectProtocol)?
