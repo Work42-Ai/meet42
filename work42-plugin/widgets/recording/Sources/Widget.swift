@@ -19,9 +19,9 @@
 // record status` is the single source of truth for "is MY session the one
 // currently recording" (AC7) — NOT session storage. `SessionServices.storage`
 // is FILE-backed for a non-task session (`SessionStorageBackend`), a
-// DIFFERENT store than `work42 storage set/get` (always work42.db) — so
+// DIFFERENT store than the `storage_set` tool (always work42.db) — so
 // Stable `meeting/*` metadata is read through `services.storage`; writes to
-// that cross-widget namespace use the shelled `work42 storage` command.
+// that cross-widget namespace use the `storage_set` tool (`services.tools`).
 // Manual Record/Stop share the same capture primitive as Calendar:
 // `meet42 record start` is a detached, fire-and-forget process (not via
 // `WidgetShellService`, which is bounded to 10s and would kill the
@@ -369,13 +369,21 @@ private struct RecordingSessionIdentityPayload: Decodable {
     let name: String
 }
 
-/// Unwrap a canonical-JSON-quoted string from `work42 storage get`'s raw
-/// (non-`--json`) stdout, e.g. `"2026-10-02T00:14:16.123Z"` -> the inner
-/// string. nil when unset (the CLI exits non-zero) or the output isn't a
-/// quoted JSON string.
+/// Write one `meeting/<key>` string into THIS session's work42.db storage with the `storage_set` tool.
+/// `services.storage` can't: it is restricted to the widget's own namespace ("recording").
+private func setMeetingValue(_ key: String, _ value: String, tools: any WidgetToolService) async -> Bool {
+    do {
+        _ = try await tools.call(
+            server: "work42-session", tool: "storage_set",
+            arguments: ["key": .string("meeting/\(key)"), "value": .string(value)], session: nil)
+        return true
+    } catch {
+        return false
+    }
+}
+
 /// Read `meeting/recording_dir` from THIS session's own storage via the
-/// SDK's native `services.storage` — NOT the shelled `work42 storage get`
-/// CLI. For a non-task session (exactly what an "event" meeting session is),
+/// SDK's native `services.storage` — NOT the `storage_get` tool. For a non-task session (exactly what an "event" meeting session is),
 /// `WidgetCommandRunner` injects `WORK42_SESSION_DIR` as the session's
 /// WORKTREE path, but `storage.json` actually lives in the chat-session
 /// metadata directory — a real work42-core bug (`SessionDiscovery`/
@@ -600,10 +608,9 @@ private final class RecordingMeetingModel {
     private func authoritativeSessionName(
         services: WidgetBackgroundServices
     ) async -> String? {
-        let command = "work42 session show --session \(recordingShellQuote(sessionId)) --json"
-        guard let result = try? await services.shell.run(command: command),
-              result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
+        guard let shown = try? await services.tools.call(
+                  server: "work42-session", tool: "session_show", arguments: [:], session: nil),
+              let data = try? JSONEncoder().encode(shown),
               let identity = try? JSONDecoder().decode(
                   RecordingSessionIdentityPayload.self, from: data
               ),
@@ -800,23 +807,9 @@ private final class RecordingMeetingModel {
             return
         }
         stopHeartbeat()
-        let endedAtJSON = recordingShellQuote("\"\(isoNow())\"")
-        let completion: WidgetShellResult
-        do {
-            completion = try await services.shell.run(
-                command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/ended_at \(endedAtJSON)"
-            )
-        } catch {
-            Meet42Trace.log("recording", "completion-write-failed", [
-                "sessionId": sessionId, "reason": reason, "error": String(describing: error),
-            ])
-            recoverFromCompletionFailure()
-            return
-        }
-        guard completion.exitCode == 0 else {
+        guard await setMeetingValue("ended_at", isoNow(), tools: services.tools) else {
             Meet42Trace.log("recording", "completion-write-failed", [
                 "sessionId": sessionId, "reason": reason,
-                "exitCode": completion.exitCode, "stderr": completion.stderr,
             ])
             recoverFromCompletionFailure()
             return
@@ -1096,23 +1089,12 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                         ["sessionId": sessionId, "recordingId": started.recordingId])
 
                     // Seed THIS session's pointer + the started_at workflow
-                    // gate. A cross-process write into THIS widget's own
-                    // session's "meeting" namespace — services.storage can't
-                    // target it (restricted to the widget's own namespace,
-                    // "recording"), so this goes through the shelled CLI,
-                    // which now resolves correctly via the WORK42_SESSION_ID
-                    // env-match (meet42-recording-lifecycle-rework s6 fixed
-                    // WidgetCommandRunner injecting the wrong directory for
-                    // this exact lookup — no ArtifactRuntime registration
-                    // needed here anymore).
-                    let dirJSON = recordingShellQuote("\"\(started.dir)\"")
-                    let startedAtJSON = recordingShellQuote("\"\(isoNow())\"")
-                    _ = try? await svc.shell.run(
-                        command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/recording_dir \(dirJSON)"
-                    )
-                    _ = try? await svc.shell.run(
-                        command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/started_at \(startedAtJSON)"
-                    )
+                    // gate. A write into THIS widget's own session's "meeting"
+                    // namespace — services.storage can't target it (restricted
+                    // to the widget's own namespace, "recording"), so it goes
+                    // through the `storage_set` tool.
+                    _ = await setMeetingValue("recording_dir", started.dir, tools: svc.tools)
+                    _ = await setMeetingValue("started_at", isoNow(), tools: svc.tools)
                     await self.refreshRecordingState()
                     try? await svc.pill.present(widgetId: "recording", sessionId: sessionId)
                 }
@@ -1147,10 +1129,7 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                     _ = try? await svc.shell.run(
                         command: "meet42 record stop --dir \(recordingShellQuote(recordingDir))"
                     )
-                    let endedAtJSON = recordingShellQuote("\"\(isoNow())\"")
-                    _ = try? await svc.shell.run(
-                        command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/ended_at \(endedAtJSON)"
-                    )
+                    _ = await setMeetingValue("ended_at", isoNow(), tools: svc.tools)
                     try? await svc.pill.dismiss(widgetId: "recording")
                     Meet42Trace.log("recording", "manual-stop", ["sessionId": sessionId])
                     await self.refreshRecordingState()
