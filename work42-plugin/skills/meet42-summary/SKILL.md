@@ -14,11 +14,11 @@ folder `templates/` next to this file has one template per kind of meeting (`gen
 
 ## Steps
 
-1. Read the whole transcript (`conversation.jsonl` in the recording directory, from `work42 storage get
-   meeting/recording_dir | tr -d '"'`), the event (`meet42 show "$(work42 storage get meeting/event_id | tr -d '"')" --json`)
+1. Read the whole transcript (`conversation.jsonl` in the recording directory, from `storage_get
+   meeting/recording_dir | tr -d '"'`), the event (`meet42 show <event id> --json` (the event id is the `storage_get` value for key `meeting/event_id`))
    and the `meeting-brief` artifact. Storage values print as JSON strings in quotes; `tr -d '"'` strips them.
    To link an issue or pull request someone mentioned, look it up with the CLIs of the session's data-source widgets
-   (`work42 widget list`, open or closed, load each skill) rather than guessing a URL. Read all of the transcript before writing anything. Each transcript line has
+   (`widget_list`, open or closed, load each skill) rather than guessing a URL. Read all of the transcript before writing anything. Each transcript line has
    `audioStartSeconds`: use it for the `mm:ss` times on decisions, concerns and key moments.
 2. **Pick the same template type as the brief** (its eyebrow says "Standup brief", "1:1 brief", …). If there is no
    brief, choose by the event as the brief skill describes, and use `general` when none fits.
@@ -34,10 +34,10 @@ folder `templates/` next to this file has one template per kind of meeting (`gen
    ```
    Edit `/tmp/meeting-summary.html`: replace every example with real content, drop sections with nothing real in them,
    and remove the leading guidance comment. There is no stylesheet to add and no colour to set. Then
-   `work42 artifact set meeting-summary /tmp/meeting-summary.html --title "Meeting summary"` and
-   `work42 artifact status meeting-summary`, and fix anything it reports: `set` must print no lint findings.
-5. Count the action items you listed (N) and run `work42 storage set meeting/summary '{"artifact":"meeting-summary","action_items":N}'`,
-   then `work42 transition "Done"`.
+   `artifact_set` and
+   `artifact_status`, and fix anything it reports: `set` must print no lint findings.
+5. Count the action items you listed (N) and run `storage_set` (key `meeting/summary`),
+   then call the `transition` tool with target "Done".
 
 ## Avatars
 

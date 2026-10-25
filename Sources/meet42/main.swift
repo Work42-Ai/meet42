@@ -71,7 +71,7 @@ enum Dispatcher {
           snapshot <eventId> --session-dir <dir> [--json]
                 Write meeting.json for the event + seed the people graph.
           link-session <eventId> <sessionId> [--json]
-                Link a work42 session back to its calendar event so
+                Link a Work42 session back to its calendar event so
                 `meet42 now` surfaces the existing sessionId for dedup.
                 Idempotent — safe to call multiple times for the same eventId.
           people (--session-dir <dir> | --meeting-json <path>) [--json]

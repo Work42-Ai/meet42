@@ -9,7 +9,7 @@ description: |
 # Summary widget
 
 Shows the session artifact `meeting-summary` full size, in the same style as the Meeting brief. The agent writes
-it in the Summary stage by following the `meet42-summary` skill (`work42 artifact set meeting-summary …`), then
+it in the Summary stage by following the `meet42-summary` skill (`artifact_set`), then
 sets `meeting/summary` to `{"artifact":"meeting-summary","action_items":N}`. The widget reloads within about two
 seconds whenever the artifact's `index.html` changes. Until it exists the widget says the agent writes the summary
 when the meeting ends; if Work42's local artifact server isn't up it says so and offers **Retry**. Links inside the

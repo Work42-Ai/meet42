@@ -234,7 +234,9 @@ final class CLICalendarStore {
 
     /// Cancels the automatic session entry for an event whose session was created on demand.
     func cancelScheduledSession(for eventId: String) async {
-        _ = try? await services.shell.run(command: "work42 schedule cancel --key \(calShellQuote("mtg:\(eventId)"))")
+        _ = try? await services.tools.call(
+            server: "work42-session", tool: "schedule_cancel",
+            arguments: ["key": .string("mtg:\(eventId)")], session: nil)
     }
 
     init(services: SessionServices) {
@@ -1573,7 +1575,7 @@ private struct CalendarPreferenceRow: View {
 //       the one-way handoff.
 //   (c) Reconciler — every ~30s reads assisted events (`meet42 modes get --json`
 //       + `meet42 list --json`) and syncs them into work42's generic scheduler
-//       (`work42 schedule add/cancel --key mtg:<id>`) at T-15min. Unchanged by
+//       (`schedule_add/schedule_cancel --key mtg:<id>`) at T-15min. Unchanged by
 //       the detection rework.
 //
 // Only ONE agent instance (across every alive session) does this work — see
@@ -2200,11 +2202,9 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
               let modes = await fetchModes(s),
               (modes.events[event.id] ?? modes.calendars[event.calendarId] ?? .viewOnly) == .assisted,
               let sessionId = event.sessionId, !sessionId.isEmpty,
-              let result = try? await s.shell.run(
-                  command: "work42 session show --session \(calShellQuote(sessionId)) --json"
-              ),
-              result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
+              let shown = try? await s.tools.call(
+                  server: "work42-session", tool: "session_show", arguments: [:], session: sessionId),
+              let data = try? JSONEncoder().encode(shown),
               let identity = try? JSONDecoder().decode(SessionIdentityPayload.self, from: data),
               identity.id == sessionId,
               !identity.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2258,7 +2258,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             let sessionId: String
             if let existing = meeting.existingSessionId {
                 guard await Self.seedExistingSession(
-                    existing, metadata: metadata, shell: s.shell
+                    existing, metadata: metadata, tools: s.tools
                 ) else {
                     await Self.stopRecording(recording.dir, shell: s.shell)
                     self.showFailure(meeting, message: "Couldn't prepare the session")
@@ -2267,7 +2267,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 sessionId = existing
             } else {
                 guard let started = await Self.mintEventSession(
-                    name: meeting.sessionName, eventId: meeting.eventId, storage: metadata
+                    name: meeting.sessionName, eventId: meeting.eventId, storage: metadata, tools: s.tools
                 ) else {
                     Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "mint-failed"])
                     await Self.stopRecording(recording.dir, shell: s.shell)
@@ -2349,8 +2349,8 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return nil
     }
 
-    /// "Chrome — Oct 2, 2:14 PM" — the name fed to `work42 session start
-    /// --name` for an ad-hoc mint. Must be unique per call (not just per app)
+    /// "Chrome — Oct 2, 2:14 PM" — the name fed to the `session_start`
+    /// tool for an ad-hoc mint. Must be unique per call (not just per app)
     /// since SessionMint derives the session id deterministically from the
     /// name; a constant name would keep resolving to the same old session.
     private static func friendlyStamp(_ date: Date) -> String {
@@ -2359,102 +2359,59 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return f.string(from: date)
     }
 
-    /// Resolve the bundled `work42` binary the same way `meet42Invocation`
-    /// resolves `meet42` — same-flavor bundle lookup first, PATH fallback for
-    /// non-bundle dev contexts.
-    static func work42Invocation(
-        extraArgs: [String]
-    ) -> (executable: URL, arguments: [String]) {
-        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/work42")
-        if FileManager.default.fileExists(atPath: bundled.path) {
-            return (bundled, extraArgs)
-        }
-        return (URL(fileURLWithPath: "/usr/bin/env"), ["work42"] + extraArgs)
-    }
-
-    /// Mint a fresh event session without selecting it in the app. The CLI has
-    /// its own timeout, so this detached process always exits and can be
-    /// awaited directly without temp-file polling.
+    /// Mint a fresh event session without selecting it, with the `session_start` tool.
     static func mintEventSession(
-        name: String, eventId: String?, storage: [(key: String, json: String)]
+        name: String, eventId: String?, storage: [(key: String, value: String)],
+        tools: any WidgetToolService
     ) async -> SessionStartResult? {
-        var args = [
-            "session", "start", "--background", "--type", "event",
-            "--name", name, "--json", "--timeout", "40",
+        var seeds: [String: WidgetJSONValue] = [:]
+        for item in storage { seeds[item.key] = .string(item.value) }
+        var arguments: [String: WidgetJSONValue] = [
+            "type": .string("event"), "name": .string(name),
+            "storage": .object(seeds), "background": .bool(true),
         ]
-        for item in storage {
-            args += ["--storage", "\(item.key)=\(item.json)"]
-        }
-        if let eventId {
-            args += ["--arg", "event_id=\(eventId)"]
-        }
-        let (exe, arguments) = Self.work42Invocation(extraArgs: args)
-        guard let (status, data) = await runToCompletion(
-            executable: exe, arguments: arguments
-        ), status == 0 else { return nil }
+        if let eventId { arguments["args"] = .object(["event_id": .string(eventId)]) }
+        guard let started = try? await tools.call(
+            server: "work42-session", tool: "session_start", arguments: arguments, session: nil),
+              let data = try? JSONEncoder().encode(started)
+        else { return nil }
         return try? JSONDecoder().decode(SessionStartResult.self, from: data)
-    }
-
-    static func runToCompletion(
-        executable: URL, arguments: [String]
-    ) async -> (Int32, Data)? {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            let outPipe = Pipe()
-            process.executableURL = executable
-            process.arguments = arguments
-            process.standardOutput = outPipe
-            process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { finished in
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: (finished.terminationStatus, data))
-            }
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                continuation.resume(returning: nil)
-            }
-        }
     }
 
     private static func meetingMetadata(
         meeting: DetectedMeeting, app: String, bundleId: String,
         recordingDir: String, startedAt: String
-    ) -> [(key: String, json: String)] {
+    ) -> [(key: String, value: String)] {
         var values = [
-            ("meeting/recording_dir", jsonString(recordingDir)),
-            ("meeting/started_at", jsonString(startedAt)),
-            ("meeting/title", jsonString(meeting.sessionName)),
-            ("meeting/source_app", jsonString(app)),
-            ("meeting/source_bundle_id", jsonString(bundleId)),
+            ("meeting/recording_dir", recordingDir),
+            ("meeting/started_at", startedAt),
+            ("meeting/title", meeting.sessionName),
+            ("meeting/source_app", app),
+            ("meeting/source_bundle_id", bundleId),
         ]
         if let start = meeting.scheduledStart, let end = meeting.scheduledEnd {
             let formatter = ISO8601DateFormatter()
             values += [
-                ("meeting/scheduled_start", jsonString(formatter.string(from: start))),
-                ("meeting/scheduled_end", jsonString(formatter.string(from: end))),
+                ("meeting/scheduled_start", formatter.string(from: start)),
+                ("meeting/scheduled_end", formatter.string(from: end)),
             ]
         }
         return values
     }
 
-    private static func jsonString(_ value: String) -> String {
-        let data = try! JSONEncoder().encode(value)
-        return String(decoding: data, as: UTF8.self)
-    }
-
     private static func seedExistingSession(
         _ sessionId: String,
-        metadata: [(key: String, json: String)],
-        shell: any WidgetShellService
+        metadata: [(key: String, value: String)],
+        tools: any WidgetToolService
     ) async -> Bool {
         for item in metadata {
-            let result = try? await shell.run(
-                command: "work42 storage set --session \(calShellQuote(sessionId)) "
-                    + "\(calShellQuote(item.key)) \(calShellQuote(item.json))"
-            )
-            guard result?.exitCode == 0 else { return false }
+            do {
+                _ = try await tools.call(
+                    server: "work42-session", tool: "storage_set",
+                    arguments: ["key": .string(item.key), "value": .string(item.value)], session: sessionId)
+            } catch {
+                return false
+            }
         }
         return true
     }
@@ -2520,18 +2477,18 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             let at = e.startsAt.addingTimeInterval(-15 * 60)
             let iso = ISO8601DateFormatter().string(from: at)
             // add is idempotent on --key — re-adding replaces the entry.
-            _ = try? await s.shell.run(
-                command: "work42 schedule add --type event"
-                    + " --name \(calShellQuote(e.title))"
-                    + " --at \(calShellQuote(iso))"
-                    + " --arg event_id=\(calShellQuote(e.id))"
-                    + " --key \(calShellQuote(key))"
-            )
+            _ = try? await s.tools.call(
+                server: "work42-session", tool: "schedule_add",
+                arguments: [
+                    "type": .string("event"), "name": .string(e.title), "at": .string(iso),
+                    "args": .object(["event_id": .string(e.id)]), "key": .string(key),
+                ], session: nil)
         }
 
         // Cancel keys we previously added that are no longer desired.
         for key in scheduledKeys.subtracting(desired) {
-            _ = try? await s.shell.run(command: "work42 schedule cancel --key \(calShellQuote(key))")
+            _ = try? await s.tools.call(
+                server: "work42-session", tool: "schedule_cancel", arguments: ["key": .string(key)], session: nil)
         }
         scheduledKeys = desired
     }
@@ -2626,7 +2583,7 @@ private nonisolated final class FirstLineProcessOutput: @unchecked Sendable {
     }
 }
 
-/// Decode target for `work42 session start --type event --json`.
+/// Decode target for the `session_start` tool's result.
 struct SessionStartResult: Decodable {
     let sessionId: String
     let ownerDir: String?

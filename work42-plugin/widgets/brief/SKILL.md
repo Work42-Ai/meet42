@@ -9,7 +9,7 @@ description: |
 # Meeting brief widget
 
 Shows the session artifact `meeting-brief` full size. The agent writes it in the Prepare for Meeting stage by
-following the `meet42-brief` skill (`work42 artifact set meeting-brief …`): why the meeting is happening, the
+following the `meet42-brief` skill (`artifact_set`): why the meeting is happening, the
 people, a card per connected source with direct links, open items, and a suggested agenda. The widget reloads within
 about two seconds whenever the artifact's `index.html` changes. Until it exists the widget says the agent prepares
 the brief before the meeting; if Work42's local artifact server isn't up it says so and offers **Retry**. Links inside

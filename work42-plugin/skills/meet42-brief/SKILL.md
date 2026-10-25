@@ -30,11 +30,11 @@ The brief's eyebrow names its type ("Standup brief"); the summary stage uses the
 
 ## Steps
 
-1. Read the event: `meet42 show "$(work42 storage get meeting/event_id | tr -d '"')" --json` (title, time, location,
+1. Read the event: `meet42 show <event id> --json` (the event id is the `storage_get` value for key `meeting/event_id`) (title, time, location,
    meeting link, organizer, attendees with their replies, `calendarColor`, description as `notesHTML`). Storage values
    print as JSON, so a string comes back in quotes; `tr -d '"'` strips them, and without it `meet42 show` finds no event.
    If `meeting/event_id` is unset this is an ad-hoc event: use `general`, say so in the hero, and skip the guest section.
-2. Gather context from the session's data sources **before you write anything**. Run `work42 widget list`: every
+2. Gather context from the session's data sources **before you write anything**. Run `widget_list`: every
    widget in it other than the meeting's own (chat, recording, brief, event details, summary, permissions, annotations)
    is a data source, **whether it is open or closed** (an issue board, pull requests, docs). For each one, load its skill
    and run the commands it names (a CLI such as an issue tracker or a code host) to find the items that relate to this
@@ -49,8 +49,8 @@ The brief's eyebrow names its type ("Standup brief"); the summary stage uses the
    ```
    Edit `/tmp/meeting-brief.html`: replace every example with real content and remove the leading `<!-- … -->`
    guidance comments. The page is plain Tailwind and kit markup; there is no stylesheet to add and no colour to set
-   (the accent follows the app). Then `work42 artifact set meeting-brief /tmp/meeting-brief.html --title "Meeting brief"`
-   and `work42 artifact status meeting-brief`, and fix anything it reports: `set` must print no lint findings.
+   (the accent follows the app). Then `artifact_set`
+   and `artifact_status`, and fix anything it reports: `set` must print no lint findings.
 
 ## Avatars
 
@@ -92,5 +92,5 @@ Initials are the first letters of the first and last word of the name (else the 
   No network requests, no external scripts, fonts or images.
 - Be specific: who is the user meeting, what is each person waiting on, what is the state of each item. No filler.
 - Never invent. If you could not find something, leave the section out or say it wasn't found.
-- Update the artifact (the same `work42 artifact set`) when the user asks you to rebuild it, including in another
+- Update the artifact (the same `artifact_set`) when the user asks you to rebuild it, including in another
   template ("use the 1:1 template"); the widget reloads itself.

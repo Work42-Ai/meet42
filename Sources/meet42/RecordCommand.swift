@@ -1,11 +1,11 @@
 // RecordCommand.swift — `meet42 record start|stop|status`: drive Meet42Capture.
 //
 // SESSION-AGNOSTIC (meet42-recording-lifecycle-rework, s1): `record` knows
-// nothing about work42 sessions. `start` allocates its OWN recordings
+// nothing about Work42 sessions. `start` allocates its OWN recordings
 // directory under `~/.work42/meet42/recordings/<recordingId>/`, writes the
 // transcript there, and hands the (recordingId, dir) pair back to the caller
 // via one JSON line on stdout — BEFORE daemonizing. A caller that wants a
-// work42 session wraps this: mint the session afterward, seeding its storage
+// Work42 session wraps this: mint the session afterward, seeding its storage
 // with a pointer (`meeting/recording_dir`) at the returned dir. This ordering
 // means recording starts the instant the mic opens, independent of the
 // (slower, session-mint) step that used to gate it.
