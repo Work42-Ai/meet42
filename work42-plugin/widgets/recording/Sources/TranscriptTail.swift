@@ -102,10 +102,14 @@ private actor TranscriptTailReader {
     }
 }
 
-/// The transcript so far, kept current by polling the file twice a second.
+/// The transcript so far, kept current by polling the file every `interval`.
 @Observable
 @MainActor
 final class TranscriptTail {
+
+    /// Lines are whole sentences, so a slower refresh reads the same; each publish re-lays out the
+    /// visible transcript, so batching a couple of seconds of lines into one keeps scrolling smooth.
+    static let interval: Duration = .seconds(2)
 
     private(set) var lines: [RecordingLine] = []
 
@@ -122,7 +126,7 @@ final class TranscriptTail {
         task = Task { [weak self] in
             while !Task.isCancelled {
                 if let update = await reader.poll() { self?.apply(update) }
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: Self.interval)
             }
         }
     }

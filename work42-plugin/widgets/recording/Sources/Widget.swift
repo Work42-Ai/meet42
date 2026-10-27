@@ -1313,6 +1313,8 @@ private struct RecordingTileView: View {
     /// signed out, in which case my avatar falls back to initials.
     @State private var account: WidgetAccountUser?
     @State private var speakersWatcher = WidgetFileWatcher()
+    /// `speakers.json`, re-read only when the watcher sees it change (not on every transcript update).
+    @State private var speakers: [String: ResolvedSpeaker] = [:]
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
     /// lifecycle-rework s1: `meet42 record` owns its own store). nil until
@@ -1324,14 +1326,18 @@ private struct RecordingTileView: View {
     @State private var recordingDir: String?
     /// Why the last Record press did not start (`recording/start_error`), shown as a banner until a
     /// recording does start. nil when there is nothing to report.
-    @State private var startError: (reason: String, message: String)?
+    @State private var startError: StartError?
+
+    /// Equatable so the 1 s poll below re-renders the tile only when the stored error changes.
+    private struct StartError: Equatable {
+        let reason: String
+        let message: String
+    }
 
     var body: some View {
-        // `tail.lines` is observed, and the speakers watcher bumps its version, so the body re-runs
-        // when either the transcript or the speaker names change.
-        let _ = speakersWatcher.version
+        // `tail.lines` is observed, and `speakers` reloads when the watcher bumps its version, so the
+        // body re-runs when either the transcript or the speaker names change.
         let lines = tail.lines
-        let speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
 
         return Group {
             if lines.isEmpty {
@@ -1355,12 +1361,12 @@ private struct RecordingTileView: View {
         .task {
             // Keep the failure banner in step with the stored start error.
             while !Task.isCancelled {
+                var latest: StartError?
                 if case .object(let object)? = try? await services.storage.get(namespace: "recording", key: "start_error"),
                    case .string(let reason)? = object["reason"], case .string(let message)? = object["message"] {
-                    startError = (reason, message)
-                } else {
-                    startError = nil
+                    latest = StartError(reason: reason, message: message)
                 }
+                if latest != startError { startError = latest }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -1380,11 +1386,16 @@ private struct RecordingTileView: View {
             guard let newDir else { return }
             tail.start(path: conversationPath(sessionDir: newDir))
             speakersWatcher.watch(speakersPath(sessionDir: newDir))
+            speakers = loadSpeakers(sessionDir: newDir)
+        }
+        .onChange(of: speakersWatcher.version) { _, _ in
+            speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
         }
         .onAppear {
             if let recordingDir {
                 tail.start(path: conversationPath(sessionDir: recordingDir))
                 speakersWatcher.watch(speakersPath(sessionDir: recordingDir))
+                speakers = loadSpeakers(sessionDir: recordingDir)
             }
         }
         .onDisappear {
@@ -1402,7 +1413,7 @@ private struct RecordingTileView: View {
         }
     }
 
-    private func startErrorBanner(_ error: (reason: String, message: String)) -> some View {
+    private func startErrorBanner(_ error: StartError) -> some View {
         HStack(alignment: .top, spacing: DT.s8) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DT.amber)
             VStack(alignment: .leading, spacing: DT.s4) {
