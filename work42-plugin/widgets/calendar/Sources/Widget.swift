@@ -306,13 +306,40 @@ final class CLICalendarStore {
         Task { await refresh() }
     }
 
-    // MARK: Refresh (the ~2s CLI poll)
+    // MARK: Refresh (the CLI runs only when the calendar store changed)
+
+    /// The files `meet42 list` and `meet42 modes get` read. Their size and modification time
+    /// are checked every 2 s; the CLI runs only when one moved, or once a minute regardless.
+    /// Running both commands every 2 s launched a process about once a second, each one
+    /// opening the calendar database (WOR-420).
+    private static let watchedPaths: [String] = {
+        let dir = (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42")
+        return ["calendar.db", "calendar.db-wal", "modes.json"].map { (dir as NSString).appendingPathComponent($0) }
+    }()
+    private static let fallbackInterval: TimeInterval = 60
+    @ObservationIgnored private var lastSignature = ""
+    @ObservationIgnored private var lastRefresh = Date.distantPast
+
+    private static func storeSignature() -> String {
+        watchedPaths.map { path in
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            return "\(modified):\(size)"
+        }.joined(separator: "|")
+    }
+
+    private func refreshIfStoreChanged() async {
+        let signature = Self.storeSignature()
+        guard signature != lastSignature || Date().timeIntervalSince(lastRefresh) >= Self.fallbackInterval else { return }
+        await refresh()
+    }
 
     func start() {
         guard timer == nil else { return }
         Task { await refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refresh() }
+            Task { @MainActor in await self?.refreshIfStoreChanged() }
         }
     }
 
@@ -322,6 +349,9 @@ final class CLICalendarStore {
     }
 
     func refresh() async {
+        // Taken before the reads, so a change landing while they run is picked up next tick.
+        lastSignature = Self.storeSignature()
+        lastRefresh = Date()
         let (from, to) = window
         let iso = ISO8601DateFormatter()
         let listCmd = "meet42 list --from \(calShellQuote(iso.string(from: from)))"
