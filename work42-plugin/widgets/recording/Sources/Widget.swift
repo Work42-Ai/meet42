@@ -880,63 +880,34 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
         model = nil
     }
 
-    /// Labels on every tab: "● REC mm:ss" while this session records, "Recording didn't start" while the last
-    /// Record press failed, and "meet42 needs setup" while the tool is missing or a permission isn't granted.
+    /// Labels on every tab: "Recording didn't start" while the last Record press failed, and "meet42 needs
+    /// setup" while the tool is missing or a permission isn't granted. No label while recording: the Stop
+    /// button already shows the elapsed time (WOR-420).
     private func runLabels(_ services: WidgetBackgroundServices) async {
-        var recording = false
-        var startedAt: Date?
-        var startFailed = false
         var needsSetup = false
-        var lastState = Date.distantPast
         var lastSetup = Date.distantPast
         while !Task.isCancelled {
             let now = Date()
-            if now.timeIntervalSince(lastState) >= 5 {
-                lastState = now
-                (recording, startedAt) = await Self.recordingState(services)
-                if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
-                    startFailed = true
-                } else {
-                    startFailed = false
-                }
+            let startFailed: Bool
+            if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
+                startFailed = true
+            } else {
+                startFailed = false
             }
             if now.timeIntervalSince(lastSetup) >= 60 {
                 lastSetup = now
                 needsSetup = await Self.setupNeeded(services.shell)
             }
             var labels: [WidgetHeaderLabel] = []
-            if recording {
-                let seconds = max(0, Int(now.timeIntervalSince(startedAt ?? now)))
-                let text = String(format: "\u{25CF} REC %02d:%02d", seconds / 60, seconds % 60)
-                labels.append(WidgetHeaderLabel(text: text, tint: .failure, url: recordingLink))
-            } else if startFailed {
+            if startFailed {
                 labels.append(WidgetHeaderLabel(text: "Recording didn\u{2019}t start", systemIcon: "exclamationmark.triangle", tint: .warning, url: recordingLink))
             }
             if needsSetup {
                 labels.append(WidgetHeaderLabel(text: "meet42 needs setup", systemIcon: "wrench.and.screwdriver", tint: .warning, url: permissionsLink))
             }
             if labels != headerLabels { headerLabels = labels }
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(5))
         }
-    }
-
-    /// Whether THIS session is the active recording (`meet42 record status` dir == `meeting/recording_dir`) and
-    /// when it started (`meeting/started_at`).
-    private static func recordingState(_ services: WidgetBackgroundServices) async -> (Bool, Date?) {
-        guard let result = try? await services.shell.run(command: "meet42 record status --json"), result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let status = try? JSONDecoder().decode(RecordingRecordStatusPayload.self, from: data),
-              status.recording, let dir = status.dir,
-              case .string(let mine)? = try? await services.storage.get(namespace: "meeting", key: "recording_dir"),
-              mine == dir else { return (false, nil) }
-        var startedAt: Date?
-        if case .string(let text)? = try? await services.storage.get(namespace: "meeting", key: "started_at") {
-            let plain = ISO8601DateFormatter()
-            let fractional = ISO8601DateFormatter()
-            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            startedAt = plain.date(from: text) ?? fractional.date(from: text)
-        }
-        return (true, startedAt)
     }
 
     /// True when `meet42` can't be run or any permission is not granted.
