@@ -60,6 +60,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
         /// Stable across re-reads: the line's `lineId`, else its timestamp and byte offset.
         let id: String
         let ts: String
+        var date: Date? = nil
         let speaker: Speaker
         let text: String
         let persistentId: String?
@@ -75,6 +76,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
     struct SystemEventEntry {
         let id: String
         let ts: String
+        var date: Date? = nil
         let event: String
         let imagePath: String?
         let appName: String?
@@ -101,6 +103,16 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
         }
     }
 
+    /// `ts` parsed once, when the line was read (off the main thread). The transcript asks for
+    /// every visible line's date on each redraw; parsing it there each time showed up in the
+    /// scroll profile (WOR-420).
+    var date: Date? {
+        switch self {
+        case .speaker(let l): return l.date
+        case .systemEvent(let e): return e.date
+        }
+    }
+
     /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`). `byteOffset` is
     /// where the line starts in the file; it names lines that carry no `lineId`, so a re-read of
     /// the same bytes yields the same ids (a fresh `UUID()` per read made SwiftUI rebuild every row).
@@ -124,6 +136,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
             self = .systemEvent(SystemEventEntry(
                 id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
+                date: parseISO8601(ts),
                 event: event,
                 imagePath: obj["image"] as? String,
                 appName: obj["app"] as? String,
@@ -140,6 +153,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
             self = .speaker(SpeakerLine(
                 id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
+                date: parseISO8601(ts),
                 speaker: SpeakerLine.Speaker(rawValue: speakerRaw) ?? .unknown,
                 text: text,
                 persistentId: obj["lineId"] as? String,
@@ -350,7 +364,7 @@ private enum ISO8601Parsing {
 }
 
 /// Parse an ISO 8601 timestamp, tolerating presence/absence of fractional secs.
-private func parseISO8601(_ ts: String) -> Date? {
+nonisolated private func parseISO8601(_ ts: String) -> Date? {
     ISO8601Parsing.fractional.date(from: ts) ?? ISO8601Parsing.whole.date(from: ts)
 }
 
@@ -1444,17 +1458,16 @@ private struct RecordingTileView: View {
     private func transcript(lines: [RecordingLine], speakers: [String: ResolvedSpeaker]) -> some View {
         ConversationView(
             items: lines,
-            // The tile opens on the newest 20 lines and each automatic older-page load adds 20, so
-            // a long meeting never lays out more than the reader has asked for.
-            pageSize: 20,
+            // Transcript lines are short, so a page is 100 of them: 20 could be shorter than the
+            // viewport and send every scroll near the top into another page load. Rows are cheap
+            // (no per-line selection or glass), so 100 lays out well.
+            pageSize: 100,
             resetKey: recordingDir ?? "",
-            rowSpacing: 12,
-            runSpacing: 4,
-            // A transcript is about who said what: every run is labeled, mine included, even 1:1.
+            rowSpacing: 16,
+            runSpacing: ConversationMetrics.lineSpacing,
             labels: .always,
-            dividerLabel: ConversationDateDivider.clockLabel(for:),
             actor: { conversationActor(for: $0, speakers: speakers) },
-            date: { parseISO8601($0.ts) }
+            date: { $0.date }
         ) { line, context in
             recordingRow(for: line, context: context)
         }
@@ -1485,17 +1498,28 @@ private struct RecordingTileView: View {
     private func recordingRow(for line: RecordingLine, context: ConversationRowContext) -> some View {
         switch line {
         case .speaker(let spoken):
-            ConversationBubble(context: context) {
+            // The shared row (the agent chat uses it too). No `.textSelection`: on macOS it hosts an
+            // AppKit selection view per line, and every one of them is repositioned on each scroll
+            // frame (WOR-420). Copy is a right-click.
+            let isMine = context.actor?.isMe == true
+            ConversationMessageRow(context: context) {
                 Text(spoken.text)
                     .font(.system(size: 16))
                     .lineSpacing(5)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, isMine ? ConversationMetrics.cardHorizontalPadding : 0)
+                    .padding(.vertical, isMine ? ConversationMetrics.cardVerticalPadding : 0)
             }
+            .contextMenu { copyButton(spoken.text) }
         case .systemEvent(let event):
             systemEventCard(for: event)
+        }
+    }
+
+    private func copyButton(_ text: String) -> some View {
+        Button("Copy") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
         }
     }
 
@@ -1519,24 +1543,26 @@ private struct RecordingTileView: View {
                 Text(ocr)
                     .font(.system(size: DT.f11))
                     .foregroundStyle(DT.textSecondary)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.center)
                     .lineLimit(6)
+                    .contextMenu { copyButton(ocr) }
             }
-            if let parsedDate = parseISO8601(entry.ts) {
+            if let parsedDate = entry.date {
                 Text(parsedDate, style: .time)
                     .font(.system(size: DT.f10))
                     .foregroundStyle(DT.textTertiary)
             }
         }
-        .padding(.horizontal, DT.s16)
-        .padding(.vertical, DT.s12)
-        .frame(maxWidth: .infinity)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(10)
         .padding(.horizontal, DT.s12)
-        .padding(.vertical, DT.s4)
+        .padding(.vertical, DT.s8)
+        .frame(maxWidth: .infinity)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+        )
+        // The centred system card of the shared conversation layout: three quarters of the row.
+        .padding(.horizontal, 48)
     }
 
     private var emptyState: some View {
