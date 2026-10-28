@@ -29,9 +29,9 @@ avatar the guest list shows (the colour comes from the email). The agent writes 
 
 ## Header labels (every tab)
 
-"● REC mm:ss" (red) while this session is recording; "Recording didn't start" (amber) while the last Record press
-failed (the reason is in the tile's banner); "meet42 needs setup" (amber) while `meet42` is missing or any permission is
-not granted, which opens the permissions widget. The first two open this widget (`meet42://widget/recording`).
+"Recording didn't start" (amber) while the last Record press failed (the reason is in the tile's banner), which opens
+this widget (`meet42://widget/recording`); "meet42 needs setup" (amber) while `meet42` is missing or any permission is
+not granted, which opens the permissions widget. There is no label while recording: the Stop button shows the time.
 
 ## Prerequisites
 

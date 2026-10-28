@@ -306,13 +306,40 @@ final class CLICalendarStore {
         Task { await refresh() }
     }
 
-    // MARK: Refresh (the ~2s CLI poll)
+    // MARK: Refresh (the CLI runs only when the calendar store changed)
+
+    /// The files `meet42 list` and `meet42 modes get` read. Their size and modification time
+    /// are checked every 2 s; the CLI runs only when one moved, or once a minute regardless.
+    /// Running both commands every 2 s launched a process about once a second, each one
+    /// opening the calendar database (WOR-420).
+    private static let watchedPaths: [String] = {
+        let dir = (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42")
+        return ["calendar.db", "calendar.db-wal", "modes.json"].map { (dir as NSString).appendingPathComponent($0) }
+    }()
+    private static let fallbackInterval: TimeInterval = 60
+    @ObservationIgnored private var lastSignature = ""
+    @ObservationIgnored private var lastRefresh = Date.distantPast
+
+    private static func storeSignature() -> String {
+        watchedPaths.map { path in
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            return "\(modified):\(size)"
+        }.joined(separator: "|")
+    }
+
+    private func refreshIfStoreChanged() async {
+        let signature = Self.storeSignature()
+        guard signature != lastSignature || Date().timeIntervalSince(lastRefresh) >= Self.fallbackInterval else { return }
+        await refresh()
+    }
 
     func start() {
         guard timer == nil else { return }
         Task { await refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refresh() }
+            Task { @MainActor in await self?.refreshIfStoreChanged() }
         }
     }
 
@@ -322,6 +349,9 @@ final class CLICalendarStore {
     }
 
     func refresh() async {
+        // Taken before the reads, so a change landing while they run is picked up next tick.
+        lastSignature = Self.storeSignature()
+        lastRefresh = Date()
         let (from, to) = window
         let iso = ISO8601DateFormatter()
         let listCmd = "meet42 list --from \(calShellQuote(iso.string(from: from)))"
@@ -2597,10 +2627,24 @@ struct SessionStartResult: Decodable {
 
 @Observable
 @MainActor
-final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackground {
+final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackground, Work42WidgetCustomHeader,
+    Work42WidgetActionPopovers {
     let id = "calendar"
     let title = "Meet42 Calendar"
     let icon = "calendar"
+    /// The period being shown ("October 2026 · Oct 25 — Oct 31 · 67 events") lives in the tile header, not as
+    /// a block above the grid; the body keeps the default 16 pt inset.
+    var contentPadding: Double { 16 }
+
+    func makeHeaderView() -> AnyView {
+        AnyView(CalendarHeaderView(widget: self))
+    }
+
+    /// The ⚙ intent's per-calendar AI assistance panel, shown by Work42 in a popover anchored to the ⚙ button.
+    func actionAreaPopover(for intentName: String, dismiss: @escaping @MainActor () -> Void) -> AnyView? {
+        guard intentName == "settings", let store else { return nil }
+        return AnyView(CalendarSettingsPopoverHost(store: store))
+    }
     var linkIntents: [WidgetLinkIntentSpec] { [] }
     var minSize: WidgetMinSize { WidgetMinSize(width: 420, height: 360) }
 
@@ -2609,10 +2653,6 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
     /// Created in `activate(services:)`, torn down in `deactivate()`. Nil until
     /// activate fires; `CalendarRootView` shows a ProgressView while nil.
     private(set) var store: CLICalendarStore?
-
-    /// Observed by `CalendarRootView` to present the CalendarSettingsPopover when
-    /// the ⚙ action-area intent fires. The view resets this to false on dismiss.
-    var settingsOpen: Bool = false
 
     @ObservationIgnored private var activatedServices: SessionServices?
 
@@ -2629,7 +2669,6 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
         store?.stop()
         store = nil
         activatedServices = nil
-        settingsOpen = false
     }
 
     func makeView(services: SessionServices) -> AnyView {
@@ -2707,18 +2746,16 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
             ),
 
             // ── 5. Settings ⚙ ────────────────────────────────────────────────
-            // Replicates the pre-conversion HomeView settings gear: sets
-            // `settingsOpen = true` so CalendarRootView presents the per-calendar
-            // AI assistance popover (CalendarSettingsPopover) anchored inside the
-            // widget body. The popover itself stays host-rendered (not action-area)
-            // because it requires a visual anchor point in the widget surface.
+            // Tapping the ⚙ button opens the per-calendar AI assistance panel in a popover anchored to the
+            // button itself (`actionAreaPopover(for:)`); `perform` only runs where no popover can be shown
+            // (a hosting Work42 that predates `Work42WidgetActionPopovers`), and does nothing there.
             WidgetIntentSpec(
                 name: "settings",
                 title: "Calendar Settings",
                 icon: "gearshape",
                 placement: [.actionArea],
                 actionAreaStyle: .icon,
-                perform: { [weak self] in self?.settingsOpen = true }
+                perform: {}
             ),
         ]
     }
@@ -2751,74 +2788,23 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
 // MARK: - CalendarRootView
 
 private struct CalendarRootView: View {
-    /// The owning CalendarWidget provides the shared CLICalendarStore (populated
-    /// in activate(services:)) and the settingsOpen flag the ⚙ intent writes to.
+    /// The owning CalendarWidget provides the shared CLICalendarStore (populated in activate(services:)).
     let widget: CalendarWidget
 
     var body: some View {
         Group {
             if let store = widget.store {
                 VStack(alignment: .leading, spacing: 0) {
-                    header(store)
-                    DT.systemAccent.opacity(0.25).frame(height: 1)
                     content(store)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .environment(\.calEventLoader, { id in await store.loadMeetEvent(id) })
                 .environment(\.calSessionCreate, { id, title in try await store.createEventSession(eventId: id, title: title) })
                 .environment(\.calSessionCancel, { id in await store.cancelScheduledSession(for: id) })
-                // Invisible 0×0 anchor for the settings popover opened by the ⚙
-                // action-area intent (CalendarWidget.intents last entry). The popover
-                // needs a visual anchor inside the widget body even though its trigger
-                // lives in the action area.
-                .overlay(alignment: .topTrailing) {
-                    Color.clear
-                        .frame(width: 0, height: 0)
-                        .popover(
-                            isPresented: Binding(
-                                get: { widget.settingsOpen },
-                                set: { widget.settingsOpen = $0 }
-                            ),
-                            arrowEdge: .top
-                        ) {
-                            CalendarSettingsPopover(
-                                choices: store.calendarChoices,
-                                setMode: { id, mode in store.setCalendarMode(id, mode) }
-                            )
-                        }
-                }
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-    }
-
-    // MARK: Header (display-only — all controls moved to action-area intents)
-    //
-    // The Day/Week/Agenda picker, Previous/Today/Next nav buttons, and the ⚙
-    // settings button have been removed from this header; they now render as
-    // CalendarWidget.intents in the tab-bar action area (AC8). What remains is
-    // the date/period context and event count — read-only display.
-
-    private func header(_ store: CLICalendarStore) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(periodLabel(store))
-                    .font(.system(size: DT.f17, weight: .bold))
-                    .foregroundStyle(.primary)
-                if !periodSubLabel(store).isEmpty {
-                    Text(periodSubLabel(store))
-                        .font(.system(size: DT.f11))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Text(subtitle(store))
-                .font(.system(size: DT.f10))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, DT.s16)
-        .padding(.top, DT.s12)
-        .padding(.bottom, DT.s8)
     }
 
     // MARK: Content router
@@ -2871,7 +2857,7 @@ private struct CalendarRootView: View {
 
     // MARK: Labels
 
-    private func periodLabel(_ store: CLICalendarStore) -> String {
+    fileprivate static func periodLabel(_ store: CLICalendarStore) -> String {
         let f = DateFormatter()
         switch store.viewMode {
         case .day:    f.dateFormat = "MMMM d, yyyy"; return f.string(from: store.referenceDate)
@@ -2880,7 +2866,7 @@ private struct CalendarRootView: View {
         }
     }
 
-    private func periodSubLabel(_ store: CLICalendarStore) -> String {
+    fileprivate static func periodSubLabel(_ store: CLICalendarStore) -> String {
         switch store.viewMode {
         case .day:
             let f = DateFormatter(); f.dateFormat = "EEEE"; return f.string(from: store.referenceDate)
@@ -2895,9 +2881,55 @@ private struct CalendarRootView: View {
         }
     }
 
-    private func subtitle(_ store: CLICalendarStore) -> String {
+    fileprivate static func subtitle(_ store: CLICalendarStore) -> String {
         let count = store.events.count
         return count == 1 ? "1 event" : "\(count) events"
+    }
+}
+
+// MARK: - CalendarSettingsPopoverHost
+
+/// The ⚙ popover's content, reading the store live so a toggle shows its new state at once.
+private struct CalendarSettingsPopoverHost: View {
+    let store: CLICalendarStore
+
+    var body: some View {
+        CalendarSettingsPopover(
+            choices: store.calendarChoices,
+            setMode: { id, mode in store.setCalendarMode(id, mode) }
+        )
+    }
+}
+
+// MARK: - CalendarHeaderView
+
+/// The tile header: the period in the title's place, its range and event count beside it. Reads the widget's
+/// observable store, so it follows the date stepper and the view menu live.
+private struct CalendarHeaderView: View {
+    let widget: CalendarWidget
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
+            if let store = widget.store {
+                Text(CalendarRootView.periodLabel(store))
+                    .font(.system(size: DT.f13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(detail(store))
+                    .font(.system(size: DT.f11))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(widget.title)
+                    .font(.system(size: DT.f13, weight: .semibold))
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+    }
+
+    private func detail(_ store: CLICalendarStore) -> String {
+        [CalendarRootView.periodSubLabel(store), CalendarRootView.subtitle(store)]
+            .filter { !$0.isEmpty }
+            .joined(separator: " \u{00B7} ")
     }
 }
 

@@ -60,6 +60,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
         /// Stable across re-reads: the line's `lineId`, else its timestamp and byte offset.
         let id: String
         let ts: String
+        var date: Date? = nil
         let speaker: Speaker
         let text: String
         let persistentId: String?
@@ -75,6 +76,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
     struct SystemEventEntry {
         let id: String
         let ts: String
+        var date: Date? = nil
         let event: String
         let imagePath: String?
         let appName: String?
@@ -101,6 +103,16 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
         }
     }
 
+    /// `ts` parsed once, when the line was read (off the main thread). The transcript asks for
+    /// every visible line's date on each redraw; parsing it there each time showed up in the
+    /// scroll profile (WOR-420).
+    var date: Date? {
+        switch self {
+        case .speaker(let l): return l.date
+        case .systemEvent(let e): return e.date
+        }
+    }
+
     /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`). `byteOffset` is
     /// where the line starts in the file; it names lines that carry no `lineId`, so a re-read of
     /// the same bytes yields the same ids (a fresh `UUID()` per read made SwiftUI rebuild every row).
@@ -124,6 +136,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
             self = .systemEvent(SystemEventEntry(
                 id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
+                date: parseISO8601(ts),
                 event: event,
                 imagePath: obj["image"] as? String,
                 appName: obj["app"] as? String,
@@ -140,6 +153,7 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
             self = .speaker(SpeakerLine(
                 id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
+                date: parseISO8601(ts),
                 speaker: SpeakerLine.Speaker(rawValue: speakerRaw) ?? .unknown,
                 text: text,
                 persistentId: obj["lineId"] as? String,
@@ -350,7 +364,7 @@ private enum ISO8601Parsing {
 }
 
 /// Parse an ISO 8601 timestamp, tolerating presence/absence of fractional secs.
-private func parseISO8601(_ ts: String) -> Date? {
+nonisolated private func parseISO8601(_ ts: String) -> Date? {
     ISO8601Parsing.fractional.date(from: ts) ?? ISO8601Parsing.whole.date(from: ts)
 }
 
@@ -866,63 +880,34 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
         model = nil
     }
 
-    /// Labels on every tab: "● REC mm:ss" while this session records, "Recording didn't start" while the last
-    /// Record press failed, and "meet42 needs setup" while the tool is missing or a permission isn't granted.
+    /// Labels on every tab: "Recording didn't start" while the last Record press failed, and "meet42 needs
+    /// setup" while the tool is missing or a permission isn't granted. No label while recording: the Stop
+    /// button already shows the elapsed time (WOR-420).
     private func runLabels(_ services: WidgetBackgroundServices) async {
-        var recording = false
-        var startedAt: Date?
-        var startFailed = false
         var needsSetup = false
-        var lastState = Date.distantPast
         var lastSetup = Date.distantPast
         while !Task.isCancelled {
             let now = Date()
-            if now.timeIntervalSince(lastState) >= 5 {
-                lastState = now
-                (recording, startedAt) = await Self.recordingState(services)
-                if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
-                    startFailed = true
-                } else {
-                    startFailed = false
-                }
+            let startFailed: Bool
+            if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
+                startFailed = true
+            } else {
+                startFailed = false
             }
             if now.timeIntervalSince(lastSetup) >= 60 {
                 lastSetup = now
                 needsSetup = await Self.setupNeeded(services.shell)
             }
             var labels: [WidgetHeaderLabel] = []
-            if recording {
-                let seconds = max(0, Int(now.timeIntervalSince(startedAt ?? now)))
-                let text = String(format: "\u{25CF} REC %02d:%02d", seconds / 60, seconds % 60)
-                labels.append(WidgetHeaderLabel(text: text, tint: .failure, url: recordingLink))
-            } else if startFailed {
+            if startFailed {
                 labels.append(WidgetHeaderLabel(text: "Recording didn\u{2019}t start", systemIcon: "exclamationmark.triangle", tint: .warning, url: recordingLink))
             }
             if needsSetup {
                 labels.append(WidgetHeaderLabel(text: "meet42 needs setup", systemIcon: "wrench.and.screwdriver", tint: .warning, url: permissionsLink))
             }
             if labels != headerLabels { headerLabels = labels }
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(5))
         }
-    }
-
-    /// Whether THIS session is the active recording (`meet42 record status` dir == `meeting/recording_dir`) and
-    /// when it started (`meeting/started_at`).
-    private static func recordingState(_ services: WidgetBackgroundServices) async -> (Bool, Date?) {
-        guard let result = try? await services.shell.run(command: "meet42 record status --json"), result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let status = try? JSONDecoder().decode(RecordingRecordStatusPayload.self, from: data),
-              status.recording, let dir = status.dir,
-              case .string(let mine)? = try? await services.storage.get(namespace: "meeting", key: "recording_dir"),
-              mine == dir else { return (false, nil) }
-        var startedAt: Date?
-        if case .string(let text)? = try? await services.storage.get(namespace: "meeting", key: "started_at") {
-            let plain = ISO8601DateFormatter()
-            let fractional = ISO8601DateFormatter()
-            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            startedAt = plain.date(from: text) ?? fractional.date(from: text)
-        }
-        return (true, startedAt)
     }
 
     /// True when `meet42` can't be run or any permission is not granted.
@@ -1313,6 +1298,8 @@ private struct RecordingTileView: View {
     /// signed out, in which case my avatar falls back to initials.
     @State private var account: WidgetAccountUser?
     @State private var speakersWatcher = WidgetFileWatcher()
+    /// `speakers.json`, re-read only when the watcher sees it change (not on every transcript update).
+    @State private var speakers: [String: ResolvedSpeaker] = [:]
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
     /// lifecycle-rework s1: `meet42 record` owns its own store). nil until
@@ -1324,14 +1311,18 @@ private struct RecordingTileView: View {
     @State private var recordingDir: String?
     /// Why the last Record press did not start (`recording/start_error`), shown as a banner until a
     /// recording does start. nil when there is nothing to report.
-    @State private var startError: (reason: String, message: String)?
+    @State private var startError: StartError?
+
+    /// Equatable so the 1 s poll below re-renders the tile only when the stored error changes.
+    private struct StartError: Equatable {
+        let reason: String
+        let message: String
+    }
 
     var body: some View {
-        // `tail.lines` is observed, and the speakers watcher bumps its version, so the body re-runs
-        // when either the transcript or the speaker names change.
-        let _ = speakersWatcher.version
+        // `tail.lines` is observed, and `speakers` reloads when the watcher bumps its version, so the
+        // body re-runs when either the transcript or the speaker names change.
         let lines = tail.lines
-        let speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
 
         return Group {
             if lines.isEmpty {
@@ -1355,12 +1346,12 @@ private struct RecordingTileView: View {
         .task {
             // Keep the failure banner in step with the stored start error.
             while !Task.isCancelled {
+                var latest: StartError?
                 if case .object(let object)? = try? await services.storage.get(namespace: "recording", key: "start_error"),
                    case .string(let reason)? = object["reason"], case .string(let message)? = object["message"] {
-                    startError = (reason, message)
-                } else {
-                    startError = nil
+                    latest = StartError(reason: reason, message: message)
                 }
+                if latest != startError { startError = latest }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -1380,11 +1371,16 @@ private struct RecordingTileView: View {
             guard let newDir else { return }
             tail.start(path: conversationPath(sessionDir: newDir))
             speakersWatcher.watch(speakersPath(sessionDir: newDir))
+            speakers = loadSpeakers(sessionDir: newDir)
+        }
+        .onChange(of: speakersWatcher.version) { _, _ in
+            speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
         }
         .onAppear {
             if let recordingDir {
                 tail.start(path: conversationPath(sessionDir: recordingDir))
                 speakersWatcher.watch(speakersPath(sessionDir: recordingDir))
+                speakers = loadSpeakers(sessionDir: recordingDir)
             }
         }
         .onDisappear {
@@ -1402,7 +1398,7 @@ private struct RecordingTileView: View {
         }
     }
 
-    private func startErrorBanner(_ error: (reason: String, message: String)) -> some View {
+    private func startErrorBanner(_ error: StartError) -> some View {
         HStack(alignment: .top, spacing: DT.s8) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DT.amber)
             VStack(alignment: .leading, spacing: DT.s4) {
@@ -1433,17 +1429,16 @@ private struct RecordingTileView: View {
     private func transcript(lines: [RecordingLine], speakers: [String: ResolvedSpeaker]) -> some View {
         ConversationView(
             items: lines,
-            // The tile opens on the newest 20 lines and each automatic older-page load adds 20, so
-            // a long meeting never lays out more than the reader has asked for.
-            pageSize: 20,
+            // Transcript lines are short, so a page is 100 of them: 20 could be shorter than the
+            // viewport and send every scroll near the top into another page load. Rows are cheap
+            // (no per-line selection or glass), so 100 lays out well.
+            pageSize: 100,
             resetKey: recordingDir ?? "",
-            rowSpacing: 12,
-            runSpacing: 4,
-            // A transcript is about who said what: every run is labeled, mine included, even 1:1.
+            rowSpacing: 16,
+            runSpacing: ConversationMetrics.lineSpacing,
             labels: .always,
-            dividerLabel: ConversationDateDivider.clockLabel(for:),
             actor: { conversationActor(for: $0, speakers: speakers) },
-            date: { parseISO8601($0.ts) }
+            date: { $0.date }
         ) { line, context in
             recordingRow(for: line, context: context)
         }
@@ -1474,17 +1469,28 @@ private struct RecordingTileView: View {
     private func recordingRow(for line: RecordingLine, context: ConversationRowContext) -> some View {
         switch line {
         case .speaker(let spoken):
-            ConversationBubble(context: context) {
+            // The shared row (the agent chat uses it too). No `.textSelection`: on macOS it hosts an
+            // AppKit selection view per line, and every one of them is repositioned on each scroll
+            // frame (WOR-420). Copy is a right-click.
+            let isMine = context.actor?.isMe == true
+            ConversationMessageRow(context: context) {
                 Text(spoken.text)
                     .font(.system(size: 16))
                     .lineSpacing(5)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, isMine ? ConversationMetrics.cardHorizontalPadding : 0)
+                    .padding(.vertical, isMine ? ConversationMetrics.cardVerticalPadding : 0)
             }
+            .contextMenu { copyButton(spoken.text) }
         case .systemEvent(let event):
             systemEventCard(for: event)
+        }
+    }
+
+    private func copyButton(_ text: String) -> some View {
+        Button("Copy") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
         }
     }
 
@@ -1508,24 +1514,26 @@ private struct RecordingTileView: View {
                 Text(ocr)
                     .font(.system(size: DT.f11))
                     .foregroundStyle(DT.textSecondary)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.center)
                     .lineLimit(6)
+                    .contextMenu { copyButton(ocr) }
             }
-            if let parsedDate = parseISO8601(entry.ts) {
+            if let parsedDate = entry.date {
                 Text(parsedDate, style: .time)
                     .font(.system(size: DT.f10))
                     .foregroundStyle(DT.textTertiary)
             }
         }
-        .padding(.horizontal, DT.s16)
-        .padding(.vertical, DT.s12)
-        .frame(maxWidth: .infinity)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(10)
         .padding(.horizontal, DT.s12)
-        .padding(.vertical, DT.s4)
+        .padding(.vertical, DT.s8)
+        .frame(maxWidth: .infinity)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+        )
+        // The centred system card of the shared conversation layout: three quarters of the row.
+        .padding(.horizontal, 48)
     }
 
     private var emptyState: some View {
