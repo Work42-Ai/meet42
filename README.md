@@ -90,6 +90,17 @@ permissions, not those of the terminal or app that launched it; `MEET42_NO_DISCL
 
 ## Release
 
+**Between releases**, ship a fix to your own Mac with one command. It builds this checkout, signs it with your
+Developer ID (the same identity as the installed app, so macOS keeps meet42's permission grants) and swaps it in
+as `~/.work42/meet42.app`; a running recording is not affected, and the previous build stays at
+`~/.work42/meet42.app.prev`:
+
+```bash
+scripts/install-local.sh
+```
+
+**A public release** is signed, notarized and published to GitHub:
+
 ```bash
 cp .env.release.example .env.release.local      # fill in your Developer ID and notary profile
 scripts/release.sh 0.1.0 --check                # what is ready, what is blocked
