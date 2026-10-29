@@ -1993,8 +1993,8 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     /// still-open call as fresh (confirmed acceptable — no cross-restart
     /// persistence needed).
     @ObservationIgnored private var handledCalls: Set<String> = []
-    /// Scheduler keys this agent has added, so it can cancel ones that drop out.
-    @ObservationIgnored private var scheduledKeys: Set<String> = []
+    /// What the reconciler has put into the scheduler: the keys it can cancel later, and what it has reported.
+    @ObservationIgnored private var ledger = ScheduleLedger()
 
     // MARK: Lifecycle
 
@@ -2287,24 +2287,29 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
             let sessionId: String
             if let existing = meeting.existingSessionId {
-                guard await Self.seedExistingSession(
-                    existing, metadata: metadata, tools: s.tools
-                ) else {
+                if let error = await Self.seedExistingSession(existing, metadata: metadata, tools: s.tools) {
+                    Meet42Trace.log("detect", "start-aborted", [
+                        "callId": callId, "reason": "seed-failed", "error": Self.describe(error),
+                    ])
                     await Self.stopRecording(recording.dir, shell: s.shell)
                     self.showFailure(meeting, message: "Couldn't prepare the session")
                     return
                 }
                 sessionId = existing
             } else {
-                guard let started = await Self.mintEventSession(
+                switch await Self.mintEventSession(
                     name: meeting.sessionName, eventId: meeting.eventId, storage: metadata, tools: s.tools
-                ) else {
-                    Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "mint-failed"])
+                ) {
+                case .success(let started):
+                    sessionId = started.sessionId
+                case .failure(let error):
+                    Meet42Trace.log("detect", "start-aborted", [
+                        "callId": callId, "reason": "mint-failed", "error": Self.describe(error),
+                    ])
                     await Self.stopRecording(recording.dir, shell: s.shell)
                     self.showFailure(meeting, message: "Couldn't create the session")
                     return
                 }
-                sessionId = started.sessionId
             }
             Meet42Trace.log("detect", "session-resolved", ["callId": callId, "sessionId": sessionId])
 
@@ -2313,6 +2318,9 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 // session-owned Recording pill without selecting that session.
                 try await s.pill.present(widgetId: "recording", sessionId: sessionId)
             } catch {
+                Meet42Trace.log("detect", "start-aborted", [
+                    "callId": callId, "reason": "pill-failed", "error": Self.describe(error),
+                ])
                 await Self.stopRecording(recording.dir, shell: s.shell)
                 self.showFailure(meeting, message: "Couldn't open the meeting pill")
                 return
@@ -2389,11 +2397,12 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return f.string(from: date)
     }
 
-    /// Mint a fresh event session without selecting it, with the `session_start` tool.
+    /// Mint a fresh event session without selecting it, with the `session_start` tool. A failure carries the
+    /// tool's own error, so the caller can put the reason in the trace instead of just "it failed".
     static func mintEventSession(
         name: String, eventId: String?, storage: [(key: String, value: String)],
         tools: any WidgetToolService
-    ) async -> SessionStartResult? {
+    ) async -> Result<SessionStartResult, any Error> {
         var seeds: [String: WidgetJSONValue] = [:]
         for item in storage { seeds[item.key] = .string(item.value) }
         var arguments: [String: WidgetJSONValue] = [
@@ -2401,11 +2410,19 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             "storage": .object(seeds), "background": .bool(true),
         ]
         if let eventId { arguments["args"] = .object(["event_id": .string(eventId)]) }
-        guard let started = try? await tools.call(
-            server: "work42-session", tool: "session_start", arguments: arguments, session: nil),
-              let data = try? JSONEncoder().encode(started)
-        else { return nil }
-        return try? JSONDecoder().decode(SessionStartResult.self, from: data)
+        do {
+            let started = try await tools.call(
+                server: "work42-session", tool: "session_start", arguments: arguments, session: nil)
+            return .success(try JSONDecoder().decode(SessionStartResult.self, from: JSONEncoder().encode(started)))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// An error as one line for the trace: the tool's own message (a `WidgetServiceError` carries what went
+    /// wrong and what to do about it), bounded so a runaway message cannot bloat `trace.jsonl`.
+    static func describe(_ error: any Error) -> String {
+        String(error.localizedDescription.prefix(300))
     }
 
     private static func meetingMetadata(
@@ -2429,21 +2446,23 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return values
     }
 
+    /// Write the meeting's pointers into an existing session. Returns the tool's error when one write fails
+    /// (nil when all went in), so the caller can trace the reason.
     private static func seedExistingSession(
         _ sessionId: String,
         metadata: [(key: String, value: String)],
         tools: any WidgetToolService
-    ) async -> Bool {
+    ) async -> (any Error)? {
         for item in metadata {
             do {
                 _ = try await tools.call(
                     server: "work42-session", tool: "storage_set",
                     arguments: ["key": .string(item.key), "value": .string(item.value)], session: sessionId)
             } catch {
-                return false
+                return error
             }
         }
-        return true
+        return nil
     }
 
     private static func stopRecording(_ dir: String, shell: any WidgetShellService) async {
@@ -2507,20 +2526,32 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             let at = e.startsAt.addingTimeInterval(-15 * 60)
             let iso = ISO8601DateFormatter().string(from: at)
             // add is idempotent on --key — re-adding replaces the entry.
-            _ = try? await s.tools.call(
-                server: "work42-session", tool: "schedule_add",
-                arguments: [
-                    "type": .string("event"), "name": .string(e.title), "at": .string(iso),
-                    "args": .object(["event_id": .string(e.id)]), "key": .string(key),
-                ], session: nil)
+            var failure: String?
+            do {
+                _ = try await s.tools.call(
+                    server: "work42-session", tool: "schedule_add",
+                    arguments: [
+                        "type": .string("event"), "name": .string(e.title), "at": .string(iso),
+                        "args": .object(["event_id": .string(e.id)]), "key": .string(key),
+                    ], session: nil)
+            } catch {
+                failure = Self.describe(error)
+            }
+            if let event = ledger.recordAdd(key: key, at: iso, error: failure) { event.trace() }
         }
 
-        // Cancel keys we previously added that are no longer desired.
-        for key in scheduledKeys.subtracting(desired) {
-            _ = try? await s.tools.call(
-                server: "work42-session", tool: "schedule_cancel", arguments: ["key": .string(key)], session: nil)
+        // Cancel keys we previously added that are no longer desired. A key stays on the ledger until its
+        // cancel has gone through, so a failed cancel is retried on the next cycle.
+        for key in ledger.staleKeys(desired: desired) {
+            var failure: String?
+            do {
+                _ = try await s.tools.call(
+                    server: "work42-session", tool: "schedule_cancel", arguments: ["key": .string(key)], session: nil)
+            } catch {
+                failure = Self.describe(error)
+            }
+            if let event = ledger.recordCancel(key: key, error: failure) { event.trace() }
         }
-        scheduledKeys = desired
     }
 
     private func fetchModes(_ s: WidgetBackgroundServices) async -> ModesPayload? {
@@ -2610,6 +2641,77 @@ private nonisolated final class FirstLineProcessOutput: @unchecked Sendable {
         lock.unlock()
         handle?.readabilityHandler = nil
         continuation?.resume(returning: result)
+    }
+}
+
+// MARK: - ScheduleLedger
+
+/// What the reconciler has put into work42's scheduler, so it can cancel what drops out and report each
+/// change once. The reconciler runs every ~30 s and re-adds every assisted event each time (`schedule_add` is
+/// idempotent), so without this a call that keeps failing would write the same trace row 2,880 times a day.
+///
+/// Pure state with no tool calls of its own: the reconciler records the outcome of each call here and gets
+/// back the trace event to write, if any.
+struct ScheduleLedger {
+
+    /// A change worth a row in `trace.jsonl` (`src` "reconcile").
+    enum Event: Equatable {
+        case scheduled(key: String, at: String)
+        case cancelled(key: String)
+        case addFailed(key: String, error: String)
+        case cancelFailed(key: String, error: String)
+
+        func trace() {
+            switch self {
+            case .scheduled(let key, let at):
+                Meet42Trace.log("reconcile", "scheduled", ["key": key, "at": at])
+            case .cancelled(let key):
+                Meet42Trace.log("reconcile", "cancelled", ["key": key])
+            case .addFailed(let key, let error):
+                Meet42Trace.log("reconcile", "schedule-add-failed", ["key": key, "error": error])
+            case .cancelFailed(let key, let error):
+                Meet42Trace.log("reconcile", "schedule-cancel-failed", ["key": key, "error": error])
+            }
+        }
+    }
+
+    /// Keys whose `schedule_add` went through and that have not been cancelled, with the fire time each holds.
+    private(set) var added: [String: String] = [:]
+
+    /// The last failure reported per call (`add:<key>` / `cancel:<key>`), so an unchanged one is not repeated.
+    private var lastFailure: [String: String] = [:]
+
+    /// The outcome of `schedule_add` for `key` at `at`. Reports a first schedule or a changed time once, and a
+    /// failure once until its message changes (or the call succeeds again).
+    mutating func recordAdd(key: String, at: String, error: String?) -> Event? {
+        if let error {
+            guard lastFailure["add:\(key)"] != error else { return nil }
+            lastFailure["add:\(key)"] = error
+            return .addFailed(key: key, error: error)
+        }
+        lastFailure["add:\(key)"] = nil
+        guard added[key] != at else { return nil }
+        added[key] = at
+        return .scheduled(key: key, at: at)
+    }
+
+    /// Keys added earlier that are no longer wanted, in a stable order.
+    func staleKeys(desired: Set<String>) -> [String] {
+        added.keys.filter { !desired.contains($0) }.sorted()
+    }
+
+    /// The outcome of `schedule_cancel` for `key`. A key leaves the ledger only once its cancel has gone
+    /// through; a failed cancel keeps it, so the next cycle tries again.
+    mutating func recordCancel(key: String, error: String?) -> Event? {
+        if let error {
+            guard lastFailure["cancel:\(key)"] != error else { return nil }
+            lastFailure["cancel:\(key)"] = error
+            return .cancelFailed(key: key, error: error)
+        }
+        lastFailure["cancel:\(key)"] = nil
+        lastFailure["add:\(key)"] = nil
+        added[key] = nil
+        return .cancelled(key: key)
     }
 }
 
