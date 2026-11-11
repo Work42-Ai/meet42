@@ -10,7 +10,10 @@
     "widget:brief",
     "widget:event-details",
     "widget:summary",
-    "widget:permissions"
+    "widget:permissions",
+    "artifacts",
+    "iosSimulator",
+    "androidDevice"
   ],
   "icon": "calendar",
   "enforce_capability_gate": true,
