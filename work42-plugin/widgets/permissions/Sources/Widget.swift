@@ -197,18 +197,13 @@ private struct PermissionsHeader: View {
 
     var body: some View {
         HStack(spacing: DT.s8) {
-            Text("meet42 permissions")
-                .font(.system(size: DT.f12, weight: .medium))
-                .foregroundStyle(.primary)
+            WidgetHeaderTitle(name: "meet42 permissions")
             Spacer(minLength: DT.s8)
-            Button {
-                Task { await model.refresh() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .glassIconButton()
-            .help("Check again")
+            HeaderPill([
+                HeaderSegment(id: "refresh", systemImage: "arrow.clockwise", label: "Check again") {
+                    Task { await model.refresh() }
+                }
+            ])
         }
     }
 }
