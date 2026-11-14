@@ -15,7 +15,7 @@ description: >
   work lives in the standalone meet42 tool (github.com/Work42-Ai/meet42), which this
   plugin's skills install from its signed releases; this plugin is UI + orchestration.
 author: work42
-sdk_version: 2.13.0
-sdk_abi: 15
+sdk_version: 2.14.0
+sdk_abi: 16
 requires: []
 global_skills: meet42-setup
