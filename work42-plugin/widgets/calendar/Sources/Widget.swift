@@ -222,9 +222,21 @@ final class CLICalendarStore {
         await MeetEventLoader.load(eventID: id, shell: services.shell)
     }
 
+    /// Creates the event's session in the foreground through the app's global `session.open` intent, so Work42
+    /// shows its "Setting up your Session" overlay and then opens the session selected. Throws when the intent fails.
+    func createEventSession(eventId: String, title: String) async throws {
+        try await services.intents.execute(id: "session.open", params: [
+            "typeId": .string("event"),
+            "name": .string(title),
+            "args": .object(["event_id": .string(eventId)]),
+        ])
+    }
+
     /// Cancels the automatic session entry for an event whose session was created on demand.
     func cancelScheduledSession(for eventId: String) async {
-        _ = try? await services.shell.run(command: "work42 schedule cancel --key \(calShellQuote("mtg:\(eventId)"))")
+        _ = try? await services.tools.call(
+            server: "work42-session", tool: "schedule_cancel",
+            arguments: ["key": .string("mtg:\(eventId)")], session: nil)
     }
 
     init(services: SessionServices) {
@@ -294,13 +306,40 @@ final class CLICalendarStore {
         Task { await refresh() }
     }
 
-    // MARK: Refresh (the ~2s CLI poll)
+    // MARK: Refresh (the CLI runs only when the calendar store changed)
+
+    /// The files `meet42 list` and `meet42 modes get` read. Their size and modification time
+    /// are checked every 2 s; the CLI runs only when one moved, or once a minute regardless.
+    /// Running both commands every 2 s launched a process about once a second, each one
+    /// opening the calendar database (WOR-420).
+    private static let watchedPaths: [String] = {
+        let dir = (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42")
+        return ["calendar.db", "calendar.db-wal", "modes.json"].map { (dir as NSString).appendingPathComponent($0) }
+    }()
+    private static let fallbackInterval: TimeInterval = 60
+    @ObservationIgnored private var lastSignature = ""
+    @ObservationIgnored private var lastRefresh = Date.distantPast
+
+    private static func storeSignature() -> String {
+        watchedPaths.map { path in
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            return "\(modified):\(size)"
+        }.joined(separator: "|")
+    }
+
+    private func refreshIfStoreChanged() async {
+        let signature = Self.storeSignature()
+        guard signature != lastSignature || Date().timeIntervalSince(lastRefresh) >= Self.fallbackInterval else { return }
+        await refresh()
+    }
 
     func start() {
         guard timer == nil else { return }
         Task { await refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refresh() }
+            Task { @MainActor in await self?.refreshIfStoreChanged() }
         }
     }
 
@@ -310,6 +349,9 @@ final class CLICalendarStore {
     }
 
     func refresh() async {
+        // Taken before the reads, so a change landing while they run is picked up next tick.
+        lastSignature = Self.storeSignature()
+        lastRefresh = Date()
         let (from, to) = window
         let iso = ISO8601DateFormatter()
         let listCmd = "meet42 list --from \(calShellQuote(iso.string(from: from)))"
@@ -1067,6 +1109,11 @@ private struct CalEventLoaderKey: EnvironmentKey {
     static let defaultValue: @MainActor (String) async -> MeetEventState = { _ in .unlinked }
 }
 
+/// Creates an event's session in the foreground through the app's `session.open` intent ("Create session now").
+private struct CalSessionCreateKey: EnvironmentKey {
+    static let defaultValue: @MainActor (_ eventId: String, _ title: String) async throws -> Void = { _, _ in }
+}
+
 /// Cancels the automatic session entry of an event (used after "Create session now").
 private struct CalSessionCancelKey: EnvironmentKey {
     static let defaultValue: @MainActor (String) async -> Void = { _ in }
@@ -1076,6 +1123,10 @@ extension EnvironmentValues {
     fileprivate var calEventLoader: @MainActor (String) async -> MeetEventState {
         get { self[CalEventLoaderKey.self] }
         set { self[CalEventLoaderKey.self] = newValue }
+    }
+    fileprivate var calSessionCreate: @MainActor (_ eventId: String, _ title: String) async throws -> Void {
+        get { self[CalSessionCreateKey.self] }
+        set { self[CalSessionCreateKey.self] = newValue }
     }
     fileprivate var calSessionCancel: @MainActor (String) async -> Void {
         get { self[CalSessionCancelKey.self] }
@@ -1093,6 +1144,7 @@ struct EventDetailPopover: View {
     let onDismiss: () -> Void
 
     @Environment(\.calEventLoader) private var loadEvent
+    @Environment(\.calSessionCreate) private var createEventSession
     @Environment(\.calSessionCancel) private var cancelScheduled
 
     @State private var event: MeetEvent?
@@ -1227,7 +1279,7 @@ struct EventDetailPopover: View {
                     HStack(spacing: -7) {
                         ForEach(Array(attendees.prefix(4).enumerated()), id: \.offset) { _, a in
                             MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
-                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24)
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24, stacked: true)
                         }
                     }
                     Text("\(attendees.count) \(attendees.count == 1 ? "person" : "people")")
@@ -1329,7 +1381,7 @@ struct EventDetailPopover: View {
                 Button {
                     Task { await createSession() }
                 } label: {
-                    Label(creating ? "Creating\u{2026}" : "Create session now", systemImage: "sparkles").lineLimit(1).fixedSize()
+                    Label("Create session now", systemImage: "sparkles").lineLimit(1).fixedSize()
                 }
                 .glassProminentCapsule(tint: DT.systemAccent)
                 .disabled(creating)
@@ -1351,19 +1403,21 @@ struct EventDetailPopover: View {
         return f.string(from: item.startsAt.addingTimeInterval(-15 * 60))
     }
 
-    /// Creates the event session now, through the same path the automatic one uses, cancels the scheduled
-    /// entry so the event doesn't get a second session, and reloads so the button becomes "Open session".
+    /// Creates the event session now in the foreground through the app's `session.open` intent (Work42 shows its
+    /// "Setting up your Session" overlay and opens the session), cancels the scheduled entry so the event doesn't
+    /// get a second session, and reloads so the button becomes "Open session in Work42". The overlay owns progress
+    /// and errors; the button stays disabled while the call runs so a double click can't create two sessions.
     private func createSession() async {
+        guard !creating else { return }
         creating = true
         createError = nil
         defer { creating = false }
-        guard let started = await CalendarDetectionAgent.mintEventSession(
-            name: item.title.isEmpty ? "Meeting" : item.title, eventId: item.id, storage: []
-        ) else {
-            createError = "Couldn\u{2019}t create the session."
+        do {
+            try await createEventSession(item.id, item.title.isEmpty ? "Meeting" : item.title)
+        } catch {
+            createError = "Couldn\u{2019}t create the session: \(error.localizedDescription)"
             return
         }
-        sessionId = started.sessionId
         await cancelScheduled(item.id)
         if case .loaded(let loaded) = await loadEvent(item.id), let linked = loaded.sessionId { sessionId = linked }
     }
@@ -1551,7 +1605,7 @@ private struct CalendarPreferenceRow: View {
 //       the one-way handoff.
 //   (c) Reconciler — every ~30s reads assisted events (`meet42 modes get --json`
 //       + `meet42 list --json`) and syncs them into work42's generic scheduler
-//       (`work42 schedule add/cancel --key mtg:<id>`) at T-15min. Unchanged by
+//       (`schedule_add/schedule_cancel --key mtg:<id>`) at T-15min. Unchanged by
 //       the detection rework.
 //
 // Only ONE agent instance (across every alive session) does this work — see
@@ -2178,11 +2232,9 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
               let modes = await fetchModes(s),
               (modes.events[event.id] ?? modes.calendars[event.calendarId] ?? .viewOnly) == .assisted,
               let sessionId = event.sessionId, !sessionId.isEmpty,
-              let result = try? await s.shell.run(
-                  command: "work42 session show --session \(calShellQuote(sessionId)) --json"
-              ),
-              result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
+              let shown = try? await s.tools.call(
+                  server: "work42-session", tool: "session_show", arguments: [:], session: sessionId),
+              let data = try? JSONEncoder().encode(shown),
               let identity = try? JSONDecoder().decode(SessionIdentityPayload.self, from: data),
               identity.id == sessionId,
               !identity.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2236,7 +2288,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             let sessionId: String
             if let existing = meeting.existingSessionId {
                 guard await Self.seedExistingSession(
-                    existing, metadata: metadata, shell: s.shell
+                    existing, metadata: metadata, tools: s.tools
                 ) else {
                     await Self.stopRecording(recording.dir, shell: s.shell)
                     self.showFailure(meeting, message: "Couldn't prepare the session")
@@ -2245,7 +2297,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 sessionId = existing
             } else {
                 guard let started = await Self.mintEventSession(
-                    name: meeting.sessionName, eventId: meeting.eventId, storage: metadata
+                    name: meeting.sessionName, eventId: meeting.eventId, storage: metadata, tools: s.tools
                 ) else {
                     Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "mint-failed"])
                     await Self.stopRecording(recording.dir, shell: s.shell)
@@ -2327,8 +2379,8 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return nil
     }
 
-    /// "Chrome — Oct 2, 2:14 PM" — the name fed to `work42 session start
-    /// --name` for an ad-hoc mint. Must be unique per call (not just per app)
+    /// "Chrome — Oct 2, 2:14 PM" — the name fed to the `session_start`
+    /// tool for an ad-hoc mint. Must be unique per call (not just per app)
     /// since SessionMint derives the session id deterministically from the
     /// name; a constant name would keep resolving to the same old session.
     private static func friendlyStamp(_ date: Date) -> String {
@@ -2337,102 +2389,59 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         return f.string(from: date)
     }
 
-    /// Resolve the bundled `work42` binary the same way `meet42Invocation`
-    /// resolves `meet42` — same-flavor bundle lookup first, PATH fallback for
-    /// non-bundle dev contexts.
-    static func work42Invocation(
-        extraArgs: [String]
-    ) -> (executable: URL, arguments: [String]) {
-        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/work42")
-        if FileManager.default.fileExists(atPath: bundled.path) {
-            return (bundled, extraArgs)
-        }
-        return (URL(fileURLWithPath: "/usr/bin/env"), ["work42"] + extraArgs)
-    }
-
-    /// Mint a fresh event session without selecting it in the app. The CLI has
-    /// its own timeout, so this detached process always exits and can be
-    /// awaited directly without temp-file polling.
+    /// Mint a fresh event session without selecting it, with the `session_start` tool.
     static func mintEventSession(
-        name: String, eventId: String?, storage: [(key: String, json: String)]
+        name: String, eventId: String?, storage: [(key: String, value: String)],
+        tools: any WidgetToolService
     ) async -> SessionStartResult? {
-        var args = [
-            "session", "start", "--background", "--type", "event",
-            "--name", name, "--json", "--timeout", "40",
+        var seeds: [String: WidgetJSONValue] = [:]
+        for item in storage { seeds[item.key] = .string(item.value) }
+        var arguments: [String: WidgetJSONValue] = [
+            "type": .string("event"), "name": .string(name),
+            "storage": .object(seeds), "background": .bool(true),
         ]
-        for item in storage {
-            args += ["--storage", "\(item.key)=\(item.json)"]
-        }
-        if let eventId {
-            args += ["--arg", "event_id=\(eventId)"]
-        }
-        let (exe, arguments) = Self.work42Invocation(extraArgs: args)
-        guard let (status, data) = await runToCompletion(
-            executable: exe, arguments: arguments
-        ), status == 0 else { return nil }
+        if let eventId { arguments["args"] = .object(["event_id": .string(eventId)]) }
+        guard let started = try? await tools.call(
+            server: "work42-session", tool: "session_start", arguments: arguments, session: nil),
+              let data = try? JSONEncoder().encode(started)
+        else { return nil }
         return try? JSONDecoder().decode(SessionStartResult.self, from: data)
-    }
-
-    static func runToCompletion(
-        executable: URL, arguments: [String]
-    ) async -> (Int32, Data)? {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            let outPipe = Pipe()
-            process.executableURL = executable
-            process.arguments = arguments
-            process.standardOutput = outPipe
-            process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { finished in
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: (finished.terminationStatus, data))
-            }
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                continuation.resume(returning: nil)
-            }
-        }
     }
 
     private static func meetingMetadata(
         meeting: DetectedMeeting, app: String, bundleId: String,
         recordingDir: String, startedAt: String
-    ) -> [(key: String, json: String)] {
+    ) -> [(key: String, value: String)] {
         var values = [
-            ("meeting/recording_dir", jsonString(recordingDir)),
-            ("meeting/started_at", jsonString(startedAt)),
-            ("meeting/title", jsonString(meeting.sessionName)),
-            ("meeting/source_app", jsonString(app)),
-            ("meeting/source_bundle_id", jsonString(bundleId)),
+            ("meeting/recording_dir", recordingDir),
+            ("meeting/started_at", startedAt),
+            ("meeting/title", meeting.sessionName),
+            ("meeting/source_app", app),
+            ("meeting/source_bundle_id", bundleId),
         ]
         if let start = meeting.scheduledStart, let end = meeting.scheduledEnd {
             let formatter = ISO8601DateFormatter()
             values += [
-                ("meeting/scheduled_start", jsonString(formatter.string(from: start))),
-                ("meeting/scheduled_end", jsonString(formatter.string(from: end))),
+                ("meeting/scheduled_start", formatter.string(from: start)),
+                ("meeting/scheduled_end", formatter.string(from: end)),
             ]
         }
         return values
     }
 
-    private static func jsonString(_ value: String) -> String {
-        let data = try! JSONEncoder().encode(value)
-        return String(decoding: data, as: UTF8.self)
-    }
-
     private static func seedExistingSession(
         _ sessionId: String,
-        metadata: [(key: String, json: String)],
-        shell: any WidgetShellService
+        metadata: [(key: String, value: String)],
+        tools: any WidgetToolService
     ) async -> Bool {
         for item in metadata {
-            let result = try? await shell.run(
-                command: "work42 storage set --session \(calShellQuote(sessionId)) "
-                    + "\(calShellQuote(item.key)) \(calShellQuote(item.json))"
-            )
-            guard result?.exitCode == 0 else { return false }
+            do {
+                _ = try await tools.call(
+                    server: "work42-session", tool: "storage_set",
+                    arguments: ["key": .string(item.key), "value": .string(item.value)], session: sessionId)
+            } catch {
+                return false
+            }
         }
         return true
     }
@@ -2498,18 +2507,18 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             let at = e.startsAt.addingTimeInterval(-15 * 60)
             let iso = ISO8601DateFormatter().string(from: at)
             // add is idempotent on --key — re-adding replaces the entry.
-            _ = try? await s.shell.run(
-                command: "work42 schedule add --type event"
-                    + " --name \(calShellQuote(e.title))"
-                    + " --at \(calShellQuote(iso))"
-                    + " --arg event_id=\(calShellQuote(e.id))"
-                    + " --key \(calShellQuote(key))"
-            )
+            _ = try? await s.tools.call(
+                server: "work42-session", tool: "schedule_add",
+                arguments: [
+                    "type": .string("event"), "name": .string(e.title), "at": .string(iso),
+                    "args": .object(["event_id": .string(e.id)]), "key": .string(key),
+                ], session: nil)
         }
 
         // Cancel keys we previously added that are no longer desired.
         for key in scheduledKeys.subtracting(desired) {
-            _ = try? await s.shell.run(command: "work42 schedule cancel --key \(calShellQuote(key))")
+            _ = try? await s.tools.call(
+                server: "work42-session", tool: "schedule_cancel", arguments: ["key": .string(key)], session: nil)
         }
         scheduledKeys = desired
     }
@@ -2604,7 +2613,7 @@ private nonisolated final class FirstLineProcessOutput: @unchecked Sendable {
     }
 }
 
-/// Decode target for `work42 session start --type event --json`.
+/// Decode target for the `session_start` tool's result.
 struct SessionStartResult: Decodable {
     let sessionId: String
     let ownerDir: String?
@@ -2618,10 +2627,24 @@ struct SessionStartResult: Decodable {
 
 @Observable
 @MainActor
-final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackground {
+final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackground, Work42WidgetCustomHeader,
+    Work42WidgetActionPopovers {
     let id = "calendar"
     let title = "Meet42 Calendar"
     let icon = "calendar"
+    /// The period being shown ("October 2026 · Oct 25 — Oct 31 · 67 events") lives in the tile header, not as
+    /// a block above the grid; the body keeps the default 16 pt inset.
+    var contentPadding: Double { 16 }
+
+    func makeHeaderView() -> AnyView {
+        AnyView(CalendarHeaderView(widget: self))
+    }
+
+    /// The ⚙ intent's per-calendar AI assistance panel, shown by Work42 in a popover anchored to the ⚙ button.
+    func actionAreaPopover(for intentName: String, dismiss: @escaping @MainActor () -> Void) -> AnyView? {
+        guard intentName == "settings", let store else { return nil }
+        return AnyView(CalendarSettingsPopoverHost(store: store))
+    }
     var linkIntents: [WidgetLinkIntentSpec] { [] }
     var minSize: WidgetMinSize { WidgetMinSize(width: 420, height: 360) }
 
@@ -2630,10 +2653,6 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
     /// Created in `activate(services:)`, torn down in `deactivate()`. Nil until
     /// activate fires; `CalendarRootView` shows a ProgressView while nil.
     private(set) var store: CLICalendarStore?
-
-    /// Observed by `CalendarRootView` to present the CalendarSettingsPopover when
-    /// the ⚙ action-area intent fires. The view resets this to false on dismiss.
-    var settingsOpen: Bool = false
 
     @ObservationIgnored private var activatedServices: SessionServices?
 
@@ -2650,7 +2669,6 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
         store?.stop()
         store = nil
         activatedServices = nil
-        settingsOpen = false
     }
 
     func makeView(services: SessionServices) -> AnyView {
@@ -2728,18 +2746,16 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
             ),
 
             // ── 5. Settings ⚙ ────────────────────────────────────────────────
-            // Replicates the pre-conversion HomeView settings gear: sets
-            // `settingsOpen = true` so CalendarRootView presents the per-calendar
-            // AI assistance popover (CalendarSettingsPopover) anchored inside the
-            // widget body. The popover itself stays host-rendered (not action-area)
-            // because it requires a visual anchor point in the widget surface.
+            // Tapping the ⚙ button opens the per-calendar AI assistance panel in a popover anchored to the
+            // button itself (`actionAreaPopover(for:)`); `perform` only runs where no popover can be shown
+            // (a hosting Work42 that predates `Work42WidgetActionPopovers`), and does nothing there.
             WidgetIntentSpec(
                 name: "settings",
                 title: "Calendar Settings",
                 icon: "gearshape",
                 placement: [.actionArea],
                 actionAreaStyle: .icon,
-                perform: { [weak self] in self?.settingsOpen = true }
+                perform: {}
             ),
         ]
     }
@@ -2772,73 +2788,23 @@ final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgrou
 // MARK: - CalendarRootView
 
 private struct CalendarRootView: View {
-    /// The owning CalendarWidget provides the shared CLICalendarStore (populated
-    /// in activate(services:)) and the settingsOpen flag the ⚙ intent writes to.
+    /// The owning CalendarWidget provides the shared CLICalendarStore (populated in activate(services:)).
     let widget: CalendarWidget
 
     var body: some View {
         Group {
             if let store = widget.store {
                 VStack(alignment: .leading, spacing: 0) {
-                    header(store)
-                    DT.systemAccent.opacity(0.25).frame(height: 1)
                     content(store)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .environment(\.calEventLoader, { id in await store.loadMeetEvent(id) })
+                .environment(\.calSessionCreate, { id, title in try await store.createEventSession(eventId: id, title: title) })
                 .environment(\.calSessionCancel, { id in await store.cancelScheduledSession(for: id) })
-                // Invisible 0×0 anchor for the settings popover opened by the ⚙
-                // action-area intent (CalendarWidget.intents last entry). The popover
-                // needs a visual anchor inside the widget body even though its trigger
-                // lives in the action area.
-                .overlay(alignment: .topTrailing) {
-                    Color.clear
-                        .frame(width: 0, height: 0)
-                        .popover(
-                            isPresented: Binding(
-                                get: { widget.settingsOpen },
-                                set: { widget.settingsOpen = $0 }
-                            ),
-                            arrowEdge: .top
-                        ) {
-                            CalendarSettingsPopover(
-                                choices: store.calendarChoices,
-                                setMode: { id, mode in store.setCalendarMode(id, mode) }
-                            )
-                        }
-                }
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-    }
-
-    // MARK: Header (display-only — all controls moved to action-area intents)
-    //
-    // The Day/Week/Agenda picker, Previous/Today/Next nav buttons, and the ⚙
-    // settings button have been removed from this header; they now render as
-    // CalendarWidget.intents in the tab-bar action area (AC8). What remains is
-    // the date/period context and event count — read-only display.
-
-    private func header(_ store: CLICalendarStore) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(periodLabel(store))
-                    .font(.system(size: DT.f17, weight: .bold))
-                    .foregroundStyle(.primary)
-                if !periodSubLabel(store).isEmpty {
-                    Text(periodSubLabel(store))
-                        .font(.system(size: DT.f11))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Text(subtitle(store))
-                .font(.system(size: DT.f10))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, DT.s16)
-        .padding(.top, DT.s12)
-        .padding(.bottom, DT.s8)
     }
 
     // MARK: Content router
@@ -2891,7 +2857,7 @@ private struct CalendarRootView: View {
 
     // MARK: Labels
 
-    private func periodLabel(_ store: CLICalendarStore) -> String {
+    fileprivate static func periodLabel(_ store: CLICalendarStore) -> String {
         let f = DateFormatter()
         switch store.viewMode {
         case .day:    f.dateFormat = "MMMM d, yyyy"; return f.string(from: store.referenceDate)
@@ -2900,7 +2866,7 @@ private struct CalendarRootView: View {
         }
     }
 
-    private func periodSubLabel(_ store: CLICalendarStore) -> String {
+    fileprivate static func periodSubLabel(_ store: CLICalendarStore) -> String {
         switch store.viewMode {
         case .day:
             let f = DateFormatter(); f.dateFormat = "EEEE"; return f.string(from: store.referenceDate)
@@ -2915,9 +2881,55 @@ private struct CalendarRootView: View {
         }
     }
 
-    private func subtitle(_ store: CLICalendarStore) -> String {
+    fileprivate static func subtitle(_ store: CLICalendarStore) -> String {
         let count = store.events.count
         return count == 1 ? "1 event" : "\(count) events"
+    }
+}
+
+// MARK: - CalendarSettingsPopoverHost
+
+/// The ⚙ popover's content, reading the store live so a toggle shows its new state at once.
+private struct CalendarSettingsPopoverHost: View {
+    let store: CLICalendarStore
+
+    var body: some View {
+        CalendarSettingsPopover(
+            choices: store.calendarChoices,
+            setMode: { id, mode in store.setCalendarMode(id, mode) }
+        )
+    }
+}
+
+// MARK: - CalendarHeaderView
+
+/// The tile header: the period in the title's place, its range and event count beside it. Reads the widget's
+/// observable store, so it follows the date stepper and the view menu live.
+private struct CalendarHeaderView: View {
+    let widget: CalendarWidget
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
+            if let store = widget.store {
+                Text(CalendarRootView.periodLabel(store))
+                    .font(.system(size: DT.f13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(detail(store))
+                    .font(.system(size: DT.f11))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(widget.title)
+                    .font(.system(size: DT.f13, weight: .semibold))
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+    }
+
+    private func detail(_ store: CLICalendarStore) -> String {
+        [CalendarRootView.periodSubLabel(store), CalendarRootView.subtitle(store)]
+            .filter { !$0.isEmpty }
+            .joined(separator: " \u{00B7} ")
     }
 }
 

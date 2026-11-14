@@ -74,11 +74,29 @@ enum WatchCommand {
             }
         })
         watcher.start()
+        let parentWatch = exitWithParent()
         // Keep watcher alive through dispatchMain (the listener blocks hold
         // a strong reference too, but this makes the intent explicit).
-        withExtendedLifetime(watcher) {
+        withExtendedLifetime((watcher, parentWatch)) {
             dispatchMain()
         }
+    }
+
+    /// `watch` writes only on a mic edge, so it never noticed the app that spawned it was gone: every
+    /// app quit or crash left one behind, each re-scanning CoreAudio every second for good (found: 12 at
+    /// once, keeping coreaudiod busy; WOR-420). Exit as soon as the parent exits, and on the 1s backstop
+    /// if it was already gone (reparented to launchd) before this source was armed.
+    private static func exitWithParent() -> DispatchSourceProcess? {
+        let parent = getppid()
+        guard parent > 1 else { exit(0) }
+        MicWatcher.parentPID = parent
+        let source = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .main)
+        source.setEventHandler {
+            Meet42Trace.log("watch", "parent-exited", ["parent": Int(parent)])
+            exit(0)
+        }
+        source.resume()
+        return source
     }
 
     // MARK: - Emit
@@ -142,6 +160,46 @@ enum WatchCommand {
         return str as String
     }
 
+    /// True when any audio device with input streams is running somewhere, i.e. some process may be
+    /// capturing a mic. One device-list read plus two reads per device: far fewer than a process scan.
+    nonisolated static func anyInputDeviceRunning() -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize
+        ) == noErr, dataSize > 0 else { return true }   // unknown: scan, as before
+        var devices = [AudioObjectID](repeating: 0, count: Int(dataSize) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, &devices
+        ) == noErr else { return true }
+
+        for device in devices {
+            var streamsAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreams,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var streamsSize: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(device, &streamsAddr, 0, nil, &streamsSize) == noErr,
+                  streamsSize > 0 else { continue }   // no input streams: not a mic
+            var runningAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var running = UInt32(0)
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(device, &runningAddr, 0, nil, &size, &running) == noErr, running != 0 {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Returns the canonical (id, name) pair for a raw bundle id, or nil if
     /// the id is not in the call-app catalog. Prefix-matched so helpers like
     /// com.google.Chrome.helper map to the canonical Chrome entry.
@@ -184,6 +242,9 @@ final class MicWatcher: @unchecked Sendable {
 
     /// Backstop re-scan timer (see start()). Held so it stays alive.
     var backstopTimer: DispatchSourceTimer?
+
+    /// The app that spawned `meet42 watch`; the backstop exits once it is no longer the parent.
+    nonisolated(unsafe) static var parentPID: pid_t?
 
     init(
         scopeBundleId: String? = nil,
@@ -232,9 +293,18 @@ final class MicWatcher: @unchecked Sendable {
         // call". The scan is microseconds (read 2 properties over ~30 process
         // objects). The event listeners above still give sub-second latency for
         // the common fresh-process case; this only covers what they miss.
+        //
+        // Skipped while no input device is running anywhere (WOR-420): then no process can hold the mic,
+        // so there is nothing to detect, and each scan is ~2 CoreAudio reads per process that land on
+        // coreaudiod. A close edge still gets its one recompute; the listeners above stay armed.
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(200))
         timer.setEventHandler { [self] in
+            if let parent = Self.parentPID, getppid() != parent { exit(0) }
+            guard WatchCommand.anyInputDeviceRunning() else {
+                if self.wasActive { self.recompute() }
+                return
+            }
             self.syncPerProcessListeners()
             self.recompute()
         }

@@ -82,13 +82,13 @@ final class BriefLabelAgent: WidgetBackgroundAgent {
         if labels != headerLabels { headerLabels = labels }
     }
 
-    /// The session's workflow stage, from `work42 workflow show --json` (`current_stage`).
+    /// The session's workflow stage, from the `workflow_status` tool (`stage`).
     private func currentStage(_ services: WidgetBackgroundServices) async -> String? {
-        let command = "work42 workflow show --session '\(services.sessionId)' --json"
-        guard let result = try? await services.shell.run(command: command), result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
-        return object["current_stage"] as? String
+        guard let status = try? await services.tools.call(
+                  server: "work42-session", tool: "workflow_status", arguments: [:], session: nil),
+              case .object(let object) = status,
+              case .string(let stage)? = object["stage"] else { return nil }
+        return stage
     }
 }
 

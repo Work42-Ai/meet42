@@ -742,7 +742,7 @@ public final class CalendarStore {
     // was work42-coupled (MeetProjectStore + the `AISchedule` model) and is
     // intentionally NOT part of the standalone meet42 domain port (M1/s6).
     // Schedule FIRING now lives in work42's generic scheduler (F2); meet42
-    // reconciles into it via `work42 schedule` (AC5), so meet42 itself holds
+    // reconciles into it via the schedule tools (AC5), so meet42 itself holds
     // no AI-schedule tables here.
 }
 

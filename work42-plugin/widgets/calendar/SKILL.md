@@ -32,7 +32,7 @@ line), and lets you set the AI assist mode per calendar and per event.
   Starting launches an app-owned recorder, keeps the same 412x108 shared pill
   shell and meeting identity while its lower row reports setup progress, then
   seeds an existing prepared event session or runs
-  `work42 session start --background` for a new one.
+  `session_start` for a new one.
 - **Handoff metadata:** Calendar writes `meeting/recording_dir`,
   `meeting/started_at`, `meeting/title` (the stable session name), `meeting/source_app`, and
   `meeting/source_bundle_id`. Matched events also receive
@@ -67,9 +67,11 @@ wrap, so nothing scrolls sideways). The popup is 440 points wide and as tall as 
   session yet; **Enable AI assistance** on a
   view-only calendar.
 
-**Create session now** creates the event session the same way the automatic one is created, cancels the scheduled
-`mtg:<id>` entry and reloads the popup, so the event never gets a second session. The scheduler also skips events that
-already have a session.
+**Create session now** creates the event session in the foreground through the app's global `session.open` intent
+(`typeId` `event`, the title as `name`, `args.event_id`), so Work42 shows its "Setting up your Session" overlay and then
+opens the session selected, like a session started from the app. It then cancels the scheduled `mtg:<id>` entry and
+reloads the popup, so the event never gets a second session. The automatic session 15 minutes before the start is
+still created in the background. The scheduler also skips events that already have a session.
 
 ## Prerequisites
 

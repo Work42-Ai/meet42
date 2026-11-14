@@ -65,7 +65,7 @@ meet42 help                       # every verb
 ## The Work42 plugin
 
 `work42-plugin/` is the Work42 plugin: an `event` session type, a meeting workflow, and widgets for event
-details, people, recording, annotations, summary, the calendar, and a **meet42 permissions** tile that shows
+details (with the guest list), recording, annotations, summary, the calendar, and a **meet42 permissions** tile that shows
 the four permissions above and lets you grant each. Install it from this repository:
 
 ```bash
@@ -89,6 +89,17 @@ permission *prompts* with a build signed by `scripts/release.sh`. (meet42 re-exe
 permissions, not those of the terminal or app that launched it; `MEET42_NO_DISCLAIM=1` turns that off.)
 
 ## Release
+
+**Between releases**, ship a fix to your own Mac with one command. It builds this checkout, signs it with your
+Developer ID (the same identity as the installed app, so macOS keeps meet42's permission grants) and swaps it in
+as `~/.work42/meet42.app`; a running recording is not affected, and the previous build stays at
+`~/.work42/meet42.app.prev`:
+
+```bash
+scripts/install-local.sh
+```
+
+**A public release** is signed, notarized and published to GitHub:
 
 ```bash
 cp .env.release.example .env.release.local      # fill in your Developer ID and notary profile

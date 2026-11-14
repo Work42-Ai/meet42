@@ -1,9 +1,9 @@
-// MeetEvent.swift — shared by the Event details, People and Recording widgets (copied into each widget's
+// MeetEvent.swift — shared by the Event details, Recording and Calendar widgets (copied into each widget's
 // Sources by scripts/sync-shared.sh, because every widget compiles on its own).
 //
 // The session stores only the calendar event id (`meeting/event_id`); everything else is read live through
 // `meet42 show <id> --json`. This file holds the tolerant decoder for that output, the loader, the avatar style
-// (so a person looks the same in People, the transcript and the header label), the RSVP grouping, the meeting
+// (so a person looks the same in the guest list, the transcript and the header label), the RSVP grouping, the meeting
 // provider detection and the relative-time label.
 
 import Foundation
@@ -206,23 +206,25 @@ enum MeetRSVP: Int, CaseIterable {
 
 extension MeetEvent {
     func count(_ group: MeetRSVP) -> Int { attendees.filter { MeetRSVP(status: $0.status) == group }.count }
-    /// True when anyone is tentative, pending or unknown (the People label turns amber).
+    /// True when anyone is tentative, pending or unknown (the guests label turns amber).
     var hasOpenReplies: Bool { count(.maybe) + count(.noReply) > 0 }
 }
 
 // MARK: - Avatars
 
-/// One avatar style everywhere (People, transcript, header label). A person's colour comes from their email
+/// One avatar style everywhere (guest list, transcript, header label). A person's colour comes from their email
 /// (else their name), so they look the same in every widget.
 enum MeetAvatar {
 
-    static let palette: [(Color, Color)] = [
-        (Color(red: 1.00, green: 0.48, blue: 0.35), Color(red: 1.00, green: 0.24, blue: 0.43)),
-        (Color(red: 0.31, green: 0.67, blue: 1.00), Color(red: 0.15, green: 0.39, blue: 0.92)),
-        (Color(red: 0.26, green: 0.91, blue: 0.48), Color(red: 0.05, green: 0.65, blue: 0.42)),
-        (Color(red: 0.69, green: 0.42, blue: 1.00), Color(red: 0.43, green: 0.16, blue: 0.85)),
-        (Color(red: 0.97, green: 0.72, blue: 0.20), Color(red: 0.91, green: 0.47, blue: 0.06)),
-        (Color(red: 0.56, green: 0.62, blue: 0.67), Color(red: 0.36, green: 0.40, blue: 0.44)),
+    /// One plain colour per slot: the glass is tinted with it and the initials are drawn in it.
+    /// (Each is the deeper stop of the gradient pair the avatars used before WOR-235.)
+    static let palette: [Color] = [
+        Color(red: 1.00, green: 0.24, blue: 0.43),
+        Color(red: 0.15, green: 0.39, blue: 0.92),
+        Color(red: 0.05, green: 0.65, blue: 0.42),
+        Color(red: 0.43, green: 0.16, blue: 0.85),
+        Color(red: 0.91, green: 0.47, blue: 0.06),
+        Color(red: 0.36, green: 0.40, blue: 0.44),
     ]
 
     /// FNV-1a over the lowercased key, mod the palette size: stable across launches (unlike `hashValue`).
@@ -247,22 +249,25 @@ enum MeetAvatar {
     }
 }
 
-/// A circular gradient avatar with initials; `gradient` overrides the palette (used for You, Speaker N and Them).
+/// The one avatar look: a liquid-glass circle tinted with a single plain colour, initials in that
+/// colour (`GlassAvatar` in Work42UI, shared with the chat). `color` overrides the person's palette
+/// colour (used for You, Speaker N and Them). `stacked` backs the glass with a solid disc so
+/// overlapping avatars stay distinguishable.
 struct MeetAvatarView: View {
     let initials: String
     let key: String
     var size: CGFloat = 30
-    var gradient: (Color, Color)?
+    var color: Color?
+    var stacked = false
 
     var body: some View {
-        let colors = gradient ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: key)]
-        Text(initials)
-            .font(.system(size: size * 0.38, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(width: size, height: size)
-            .background(Circle().fill(LinearGradient(colors: [colors.0, colors.1], startPoint: .topLeading, endPoint: .bottomTrailing)))
-            .overlay(Circle().strokeBorder(Color.white.opacity(0.65), lineWidth: 1.5))
-            .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+        let tint = color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: key)]
+        GlassAvatar(initials: initials, color: tint, size: size)
+            .background {
+                if stacked {
+                    Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(-2)
+                }
+            }
     }
 }
 

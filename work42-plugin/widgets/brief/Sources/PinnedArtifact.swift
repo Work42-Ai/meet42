@@ -64,7 +64,7 @@ final class WidgetFileWatcher {
 
 enum PinnedArtifactLocator {
 
-    /// `<session dir>/artifacts/<id>/index.html`. The session dir is the one `work42 artifact set` registered with
+    /// `<session dir>/artifacts/<id>/index.html`. The session dir is the one `artifact_set` registered with
     /// the artifact server, else the session's worktree (what the widgets register themselves). Nil when neither
     /// is known.
     static func indexPath(sessionId: String?, worktreePath: String?, artifactId: String) -> String? {

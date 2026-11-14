@@ -19,9 +19,9 @@
 // record status` is the single source of truth for "is MY session the one
 // currently recording" (AC7) — NOT session storage. `SessionServices.storage`
 // is FILE-backed for a non-task session (`SessionStorageBackend`), a
-// DIFFERENT store than `work42 storage set/get` (always work42.db) — so
+// DIFFERENT store than the `storage_set` tool (always work42.db) — so
 // Stable `meeting/*` metadata is read through `services.storage`; writes to
-// that cross-widget namespace use the shelled `work42 storage` command.
+// that cross-widget namespace use the `storage_set` tool (`services.tools`).
 // Manual Record/Stop share the same capture primitive as Calendar:
 // `meet42 record start` is a detached, fire-and-forget process (not via
 // `WidgetShellService`, which is bounded to 10s and would kill the
@@ -54,11 +54,13 @@ private let meetingRecordingPurpleLight = Color(red: 0xC4 / 255, green: 0xB5 / 2
 /// or a system-event line (missing-`type` ⇒ speaker line, for back-compat)
 ///   { "ts", "type": "system_event", "event", "image"?, "app"?, "bundle_id"?,
 ///     "ocr_text"?, "rect": {x,y,width,height} }.
-enum RecordingLine: Identifiable {
+nonisolated enum RecordingLine: Identifiable, Sendable {
 
     struct SpeakerLine {
-        let id: UUID
+        /// Stable across re-reads: the line's `lineId`, else its timestamp and byte offset.
+        let id: String
         let ts: String
+        var date: Date? = nil
         let speaker: Speaker
         let text: String
         let persistentId: String?
@@ -72,8 +74,9 @@ enum RecordingLine: Identifiable {
     }
 
     struct SystemEventEntry {
-        let id: UUID
+        let id: String
         let ts: String
+        var date: Date? = nil
         let event: String
         let imagePath: String?
         let appName: String?
@@ -85,15 +88,35 @@ enum RecordingLine: Identifiable {
     case speaker(SpeakerLine)
     case systemEvent(SystemEventEntry)
 
-    var id: UUID {
+    var id: String {
         switch self {
         case .speaker(let l): return l.id
         case .systemEvent(let e): return e.id
         }
     }
 
-    /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`).
-    init?(jsonString: String) {
+    /// The line's ISO 8601 timestamp, whichever kind it is.
+    var ts: String {
+        switch self {
+        case .speaker(let l): return l.ts
+        case .systemEvent(let e): return e.ts
+        }
+    }
+
+    /// `ts` parsed once, when the line was read (off the main thread). The transcript asks for
+    /// every visible line's date on each redraw; parsing it there each time showed up in the
+    /// scroll profile (WOR-420).
+    var date: Date? {
+        switch self {
+        case .speaker(let l): return l.date
+        case .systemEvent(let e): return e.date
+        }
+    }
+
+    /// Parse one JSONL string; nil on a malformed line (so callers `compactMap`). `byteOffset` is
+    /// where the line starts in the file; it names lines that carry no `lineId`, so a re-read of
+    /// the same bytes yields the same ids (a fresh `UUID()` per read made SwiftUI rebuild every row).
+    init?(jsonString: String, byteOffset: Int = 0) {
         guard let data = jsonString.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ts = obj["ts"] as? String else {
@@ -111,8 +134,9 @@ enum RecordingLine: Identifiable {
                 cgRect = CGRect(x: rx, y: ry, width: rw, height: rh)
             }
             self = .systemEvent(SystemEventEntry(
-                id: UUID(),
+                id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
+                date: parseISO8601(ts),
                 event: event,
                 imagePath: obj["image"] as? String,
                 appName: obj["app"] as? String,
@@ -127,8 +151,9 @@ enum RecordingLine: Identifiable {
                 return nil
             }
             self = .speaker(SpeakerLine(
-                id: UUID(),
+                id: (obj["lineId"] as? String) ?? "\(ts)@\(byteOffset)",
                 ts: ts,
+                date: parseISO8601(ts),
                 speaker: SpeakerLine.Speaker(rawValue: speakerRaw) ?? .unknown,
                 text: text,
                 persistentId: obj["lineId"] as? String,
@@ -153,17 +178,6 @@ private func conversationPath(sessionDir: String) -> String {
 
 private func speakersPath(sessionDir: String) -> String {
     (sessionDir as NSString).appendingPathComponent("speakers.json")
-}
-
-/// Parse `conversation.jsonl` line by line; empty when missing/undecodable.
-private func parseConversation(sessionDir: String) -> [RecordingLine] {
-    guard let raw = try? String(contentsOfFile: conversationPath(sessionDir: sessionDir), encoding: .utf8) else {
-        return []
-    }
-    return raw
-        .components(separatedBy: "\n")
-        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        .compactMap { RecordingLine(jsonString: $0) }
 }
 
 /// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
@@ -334,14 +348,24 @@ private enum Meet42Trace {
     }
 }
 
+/// Shared formatters: allocating two `ISO8601DateFormatter`s per call was a per-row cost on every
+/// body pass. `ISO8601DateFormatter` is thread-safe for formatting once configured.
+private enum ISO8601Parsing {
+    nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) static let whole: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+}
+
 /// Parse an ISO 8601 timestamp, tolerating presence/absence of fractional secs.
-private func parseISO8601(_ ts: String) -> Date? {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: ts) { return d }
-    let f2 = ISO8601DateFormatter()
-    f2.formatOptions = [.withInternetDateTime]
-    return f2.date(from: ts)
+nonisolated private func parseISO8601(_ ts: String) -> Date? {
+    ISO8601Parsing.fractional.date(from: ts) ?? ISO8601Parsing.whole.date(from: ts)
 }
 
 // MARK: - Recording truth (meet42 record status + the workflow-gate storage)
@@ -359,13 +383,21 @@ private struct RecordingSessionIdentityPayload: Decodable {
     let name: String
 }
 
-/// Unwrap a canonical-JSON-quoted string from `work42 storage get`'s raw
-/// (non-`--json`) stdout, e.g. `"2026-10-02T00:14:16.123Z"` -> the inner
-/// string. nil when unset (the CLI exits non-zero) or the output isn't a
-/// quoted JSON string.
+/// Write one `meeting/<key>` string into THIS session's work42.db storage with the `storage_set` tool.
+/// `services.storage` can't: it is restricted to the widget's own namespace ("recording").
+private func setMeetingValue(_ key: String, _ value: String, tools: any WidgetToolService) async -> Bool {
+    do {
+        _ = try await tools.call(
+            server: "work42-session", tool: "storage_set",
+            arguments: ["key": .string("meeting/\(key)"), "value": .string(value)], session: nil)
+        return true
+    } catch {
+        return false
+    }
+}
+
 /// Read `meeting/recording_dir` from THIS session's own storage via the
-/// SDK's native `services.storage` — NOT the shelled `work42 storage get`
-/// CLI. For a non-task session (exactly what an "event" meeting session is),
+/// SDK's native `services.storage` — NOT the `storage_get` tool. For a non-task session (exactly what an "event" meeting session is),
 /// `WidgetCommandRunner` injects `WORK42_SESSION_DIR` as the session's
 /// WORKTREE path, but `storage.json` actually lives in the chat-session
 /// metadata directory — a real work42-core bug (`SessionDiscovery`/
@@ -590,10 +622,9 @@ private final class RecordingMeetingModel {
     private func authoritativeSessionName(
         services: WidgetBackgroundServices
     ) async -> String? {
-        let command = "work42 session show --session \(recordingShellQuote(sessionId)) --json"
-        guard let result = try? await services.shell.run(command: command),
-              result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
+        guard let shown = try? await services.tools.call(
+                  server: "work42-session", tool: "session_show", arguments: [:], session: nil),
+              let data = try? JSONEncoder().encode(shown),
               let identity = try? JSONDecoder().decode(
                   RecordingSessionIdentityPayload.self, from: data
               ),
@@ -790,23 +821,9 @@ private final class RecordingMeetingModel {
             return
         }
         stopHeartbeat()
-        let endedAtJSON = recordingShellQuote("\"\(isoNow())\"")
-        let completion: WidgetShellResult
-        do {
-            completion = try await services.shell.run(
-                command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/ended_at \(endedAtJSON)"
-            )
-        } catch {
-            Meet42Trace.log("recording", "completion-write-failed", [
-                "sessionId": sessionId, "reason": reason, "error": String(describing: error),
-            ])
-            recoverFromCompletionFailure()
-            return
-        }
-        guard completion.exitCode == 0 else {
+        guard await setMeetingValue("ended_at", isoNow(), tools: services.tools) else {
             Meet42Trace.log("recording", "completion-write-failed", [
                 "sessionId": sessionId, "reason": reason,
-                "exitCode": completion.exitCode, "stderr": completion.stderr,
             ])
             recoverFromCompletionFailure()
             return
@@ -863,63 +880,34 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
         model = nil
     }
 
-    /// Labels on every tab: "● REC mm:ss" while this session records, "Recording didn't start" while the last
-    /// Record press failed, and "meet42 needs setup" while the tool is missing or a permission isn't granted.
+    /// Labels on every tab: "Recording didn't start" while the last Record press failed, and "meet42 needs
+    /// setup" while the tool is missing or a permission isn't granted. No label while recording: the Stop
+    /// button already shows the elapsed time (WOR-420).
     private func runLabels(_ services: WidgetBackgroundServices) async {
-        var recording = false
-        var startedAt: Date?
-        var startFailed = false
         var needsSetup = false
-        var lastState = Date.distantPast
         var lastSetup = Date.distantPast
         while !Task.isCancelled {
             let now = Date()
-            if now.timeIntervalSince(lastState) >= 5 {
-                lastState = now
-                (recording, startedAt) = await Self.recordingState(services)
-                if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
-                    startFailed = true
-                } else {
-                    startFailed = false
-                }
+            let startFailed: Bool
+            if case .object? = try? await services.storage.get(namespace: "recording", key: "start_error") {
+                startFailed = true
+            } else {
+                startFailed = false
             }
             if now.timeIntervalSince(lastSetup) >= 60 {
                 lastSetup = now
                 needsSetup = await Self.setupNeeded(services.shell)
             }
             var labels: [WidgetHeaderLabel] = []
-            if recording {
-                let seconds = max(0, Int(now.timeIntervalSince(startedAt ?? now)))
-                let text = String(format: "\u{25CF} REC %02d:%02d", seconds / 60, seconds % 60)
-                labels.append(WidgetHeaderLabel(text: text, tint: .failure, url: recordingLink))
-            } else if startFailed {
+            if startFailed {
                 labels.append(WidgetHeaderLabel(text: "Recording didn\u{2019}t start", systemIcon: "exclamationmark.triangle", tint: .warning, url: recordingLink))
             }
             if needsSetup {
                 labels.append(WidgetHeaderLabel(text: "meet42 needs setup", systemIcon: "wrench.and.screwdriver", tint: .warning, url: permissionsLink))
             }
             if labels != headerLabels { headerLabels = labels }
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(5))
         }
-    }
-
-    /// Whether THIS session is the active recording (`meet42 record status` dir == `meeting/recording_dir`) and
-    /// when it started (`meeting/started_at`).
-    private static func recordingState(_ services: WidgetBackgroundServices) async -> (Bool, Date?) {
-        guard let result = try? await services.shell.run(command: "meet42 record status --json"), result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let status = try? JSONDecoder().decode(RecordingRecordStatusPayload.self, from: data),
-              status.recording, let dir = status.dir,
-              case .string(let mine)? = try? await services.storage.get(namespace: "meeting", key: "recording_dir"),
-              mine == dir else { return (false, nil) }
-        var startedAt: Date?
-        if case .string(let text)? = try? await services.storage.get(namespace: "meeting", key: "started_at") {
-            let plain = ISO8601DateFormatter()
-            let fractional = ISO8601DateFormatter()
-            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            startedAt = plain.date(from: text) ?? fractional.date(from: text)
-        }
-        return (true, startedAt)
     }
 
     /// True when `meet42` can't be run or any permission is not granted.
@@ -1086,23 +1074,12 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                         ["sessionId": sessionId, "recordingId": started.recordingId])
 
                     // Seed THIS session's pointer + the started_at workflow
-                    // gate. A cross-process write into THIS widget's own
-                    // session's "meeting" namespace — services.storage can't
-                    // target it (restricted to the widget's own namespace,
-                    // "recording"), so this goes through the shelled CLI,
-                    // which now resolves correctly via the WORK42_SESSION_ID
-                    // env-match (meet42-recording-lifecycle-rework s6 fixed
-                    // WidgetCommandRunner injecting the wrong directory for
-                    // this exact lookup — no ArtifactRuntime registration
-                    // needed here anymore).
-                    let dirJSON = recordingShellQuote("\"\(started.dir)\"")
-                    let startedAtJSON = recordingShellQuote("\"\(isoNow())\"")
-                    _ = try? await svc.shell.run(
-                        command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/recording_dir \(dirJSON)"
-                    )
-                    _ = try? await svc.shell.run(
-                        command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/started_at \(startedAtJSON)"
-                    )
+                    // gate. A write into THIS widget's own session's "meeting"
+                    // namespace — services.storage can't target it (restricted
+                    // to the widget's own namespace, "recording"), so it goes
+                    // through the `storage_set` tool.
+                    _ = await setMeetingValue("recording_dir", started.dir, tools: svc.tools)
+                    _ = await setMeetingValue("started_at", isoNow(), tools: svc.tools)
                     await self.refreshRecordingState()
                     try? await svc.pill.present(widgetId: "recording", sessionId: sessionId)
                 }
@@ -1137,10 +1114,7 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                     _ = try? await svc.shell.run(
                         command: "meet42 record stop --dir \(recordingShellQuote(recordingDir))"
                     )
-                    let endedAtJSON = recordingShellQuote("\"\(isoNow())\"")
-                    _ = try? await svc.shell.run(
-                        command: "work42 storage set --session \(recordingShellQuote(sessionId)) meeting/ended_at \(endedAtJSON)"
-                    )
+                    _ = await setMeetingValue("ended_at", isoNow(), tools: svc.tools)
                     try? await svc.pill.dismiss(widgetId: "recording")
                     Meet42Trace.log("recording", "manual-stop", ["sessionId": sessionId])
                     await self.refreshRecordingState()
@@ -1264,7 +1238,7 @@ struct TranscriptIdentity {
     let name: String
     let initials: String
     let key: String
-    let gradient: (Color, Color)?
+    let color: Color?
     let muted: Bool
 
     static func resolve(
@@ -1275,27 +1249,27 @@ struct TranscriptIdentity {
             if let me {
                 return TranscriptIdentity(
                     name: "You", initials: MeetAvatar.initials(name: me.name, email: me.email),
-                    key: MeetAvatar.key(name: me.name, email: me.email), gradient: nil, muted: false
+                    key: MeetAvatar.key(name: me.name, email: me.email), color: nil, muted: false
                 )
             }
-            return TranscriptIdentity(name: "You", initials: "Y", key: "you", gradient: MeetAvatar.palette[4], muted: false)
+            return TranscriptIdentity(name: "You", initials: "Y", key: "you", color: MeetAvatar.palette[4], muted: false)
         case .them:
             let label = line.speakerLabel ?? "Them"
             if let matched = speakers[label] ?? speakers["Them"] ?? speakers["them"] {
                 return TranscriptIdentity(
                     name: matched.name, initials: MeetAvatar.initials(name: matched.name, email: matched.email),
-                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), gradient: nil, muted: false
+                    key: MeetAvatar.key(name: matched.name, email: matched.email ?? matched.personId), color: nil, muted: false
                 )
             }
             if label.hasPrefix("Speaker "), let n = Int(label.dropFirst("Speaker ".count)) {
                 return TranscriptIdentity(
                     name: label, initials: "S\(n)", key: label,
-                    gradient: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
+                    color: MeetAvatar.palette[abs(n) % MeetAvatar.palette.count], muted: false
                 )
             }
-            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", gradient: MeetAvatar.palette[5], muted: true)
+            return TranscriptIdentity(name: "Them", initials: "\u{00B7}", key: "them", color: MeetAvatar.palette[5], muted: true)
         case .unknown:
-            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", gradient: MeetAvatar.palette[5], muted: true)
+            return TranscriptIdentity(name: "Unknown", initials: "?", key: "unknown", color: MeetAvatar.palette[5], muted: true)
         }
     }
 }
@@ -1318,8 +1292,14 @@ private struct RecordingTileView: View {
     let services: SessionServices
     @State private var eventState = TileEventHolder()
 
-    @State private var conversationWatcher = WidgetFileWatcher()
+    /// The transcript, read incrementally (only appended lines are parsed, off the main thread).
+    @State private var tail = TranscriptTail()
+    /// The signed-in account (name and profile photo) for my own lines; nil until read, or when
+    /// signed out, in which case my avatar falls back to initials.
+    @State private var account: WidgetAccountUser?
     @State private var speakersWatcher = WidgetFileWatcher()
+    /// `speakers.json`, re-read only when the watcher sees it change (not on every transcript update).
+    @State private var speakers: [String: ResolvedSpeaker] = [:]
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
     /// lifecycle-rework s1: `meet42 record` owns its own store). nil until
@@ -1331,38 +1311,24 @@ private struct RecordingTileView: View {
     @State private var recordingDir: String?
     /// Why the last Record press did not start (`recording/start_error`), shown as a banner until a
     /// recording does start. nil when there is nothing to report.
-    @State private var startError: (reason: String, message: String)?
+    @State private var startError: StartError?
+
+    /// Equatable so the 1 s poll below re-renders the tile only when the stored error changes.
+    private struct StartError: Equatable {
+        let reason: String
+        let message: String
+    }
 
     var body: some View {
-        // Register both watchers as dependencies so the body re-runs on change.
-        let _ = conversationWatcher.version
-        let _ = speakersWatcher.version
-        let lines = recordingDir.map { parseConversation(sessionDir: $0) } ?? []
-        let speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
+        // `tail.lines` is observed, and `speakers` reloads when the watcher bumps its version, so the
+        // body re-runs when either the transcript or the speaker names change.
+        let lines = tail.lines
 
         return Group {
             if lines.isEmpty {
                 emptyState
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(lines) { line in
-                                recordingBubble(for: line, speakers: speakers)
-                                    .id(line.id)
-                            }
-                        }
-                        .padding(.horizontal, DT.s12)
-                        .padding(.vertical, DT.s8)
-                    }
-                    .onChange(of: lines.count) { _, _ in
-                        if let last = lines.last {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
+                transcript(lines: lines, speakers: speakers)
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -1373,18 +1339,19 @@ private struct RecordingTileView: View {
                 if case .loaded(let event) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
                     eventState.currentUser = event.attendees.first(where: { $0.isCurrentUser })
                 }
+                account = await services.account?.currentUser()
                 try? await Task.sleep(for: .seconds(60))
             }
         }
         .task {
             // Keep the failure banner in step with the stored start error.
             while !Task.isCancelled {
+                var latest: StartError?
                 if case .object(let object)? = try? await services.storage.get(namespace: "recording", key: "start_error"),
                    case .string(let reason)? = object["reason"], case .string(let message)? = object["message"] {
-                    startError = (reason, message)
-                } else {
-                    startError = nil
+                    latest = StartError(reason: reason, message: message)
                 }
+                if latest != startError { startError = latest }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -1402,17 +1369,22 @@ private struct RecordingTileView: View {
         }
         .onChange(of: recordingDir) { _, newDir in
             guard let newDir else { return }
-            conversationWatcher.watch(conversationPath(sessionDir: newDir))
+            tail.start(path: conversationPath(sessionDir: newDir))
             speakersWatcher.watch(speakersPath(sessionDir: newDir))
+            speakers = loadSpeakers(sessionDir: newDir)
+        }
+        .onChange(of: speakersWatcher.version) { _, _ in
+            speakers = recordingDir.map { loadSpeakers(sessionDir: $0) } ?? [:]
         }
         .onAppear {
             if let recordingDir {
-                conversationWatcher.watch(conversationPath(sessionDir: recordingDir))
+                tail.start(path: conversationPath(sessionDir: recordingDir))
                 speakersWatcher.watch(speakersPath(sessionDir: recordingDir))
+                speakers = loadSpeakers(sessionDir: recordingDir)
             }
         }
         .onDisappear {
-            conversationWatcher.stop()
+            tail.stop()
             speakersWatcher.stop()
         }
     }
@@ -1426,7 +1398,7 @@ private struct RecordingTileView: View {
         }
     }
 
-    private func startErrorBanner(_ error: (reason: String, message: String)) -> some View {
+    private func startErrorBanner(_ error: StartError) -> some View {
         HStack(alignment: .top, spacing: DT.s8) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DT.amber)
             VStack(alignment: .leading, spacing: DT.s4) {
@@ -1451,45 +1423,75 @@ private struct RecordingTileView: View {
         .padding(.top, DT.s8)
     }
 
-    @ViewBuilder
-    private func recordingBubble(
-        for line: RecordingLine,
-        speakers: [String: ResolvedSpeaker]
-    ) -> some View {
-        switch line {
-        case .speaker(let s): speakerBubble(for: s, speakers: speakers)
-        case .systemEvent(let e): systemEventCard(for: e)
+    /// Windowing, bottom pinning, automatic older-page loading and the "Jump to latest" pill come
+    /// from the shared `ConversationView` (Work42UI), the same component as the agent chat.
+    /// `lines` only ever grows by the appended lines (`TranscriptTail`).
+    private func transcript(lines: [RecordingLine], speakers: [String: ResolvedSpeaker]) -> some View {
+        ConversationView(
+            items: lines,
+            // Transcript lines are short, so a page is 100 of them: 20 could be shorter than the
+            // viewport and send every scroll near the top into another page load. Rows are cheap
+            // (no per-line selection or glass), so 100 lays out well.
+            pageSize: 100,
+            resetKey: recordingDir ?? "",
+            rowSpacing: 16,
+            runSpacing: ConversationMetrics.lineSpacing,
+            labels: .always,
+            actor: { conversationActor(for: $0, speakers: speakers) },
+            date: { $0.date }
+        ) { line, context in
+            recordingRow(for: line, context: context)
         }
     }
 
-    /// One transcript line: the shared People-style avatar, the speaker's name and time, and the text.
-    /// You = the current user (from the linked event, else "Y"); `Speaker N` = a numbered avatar with a stable
-    /// colour; `Them` = grey; a speaker the agent matched in speakers.json = that person's name and People avatar.
-    @ViewBuilder
-    private func speakerBubble(
-        for line: RecordingLine.SpeakerLine,
-        speakers: [String: ResolvedSpeaker]
-    ) -> some View {
-        let who = TranscriptIdentity.resolve(line: line, speakers: speakers, me: eventState.currentUser)
-        HStack(alignment: .top, spacing: DT.s8) {
-            MeetAvatarView(initials: who.initials, key: who.key, size: 26, gradient: who.gradient)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(who.name)
-                        .font(.system(size: DT.f11, weight: .semibold))
-                        .foregroundStyle(who.muted ? DT.textSecondary : DT.textPrimary)
-                    if let date = parseISO8601(line.ts) {
-                        Text(date, style: .time).font(.system(size: DT.f10)).foregroundStyle(DT.textTertiary)
-                    }
-                }
-                Text(line.text)
-                    .font(.system(size: DT.f12))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
+    /// The conversation actor for a transcript line. System events belong to no one, so they
+    /// neither count towards "three or more speakers" nor break a speaker's run.
+    private func conversationActor(for line: RecordingLine, speakers: [String: ResolvedSpeaker]) -> ConversationActor? {
+        guard case .speaker(let spoken) = line else { return nil }
+        let who = TranscriptIdentity.resolve(line: spoken, speakers: speakers, me: eventState.currentUser)
+        let color = who.color ?? MeetAvatar.palette[MeetAvatar.paletteIndex(for: who.key)]
+        guard spoken.speaker == .you else {
+            return ConversationActor(id: who.key, name: who.name, initials: who.initials, color: color, isMe: false)
         }
-        .padding(.vertical, 2)
+        // My own lines: my account's profile photo when signed in with one, else my initials.
+        let initials = account.map { MeetAvatar.initials(name: $0.displayName, email: $0.email) } ?? who.initials
+        return ConversationActor(
+            id: who.key, name: who.name, initials: initials.isEmpty || initials == "?" ? who.initials : initials,
+            // My bubble is the accent colour, so my label and avatar ring are too.
+            color: DT.systemAccent, isMe: true, imageURL: account?.photoURL
+        )
+    }
+
+    /// One row: a speaker line in a chat bubble (you trailing in the accent, others leading; with three
+    /// or more speakers a run's first line carries the glass avatar, name and time), or a centred
+    /// system-event card.
+    @ViewBuilder
+    private func recordingRow(for line: RecordingLine, context: ConversationRowContext) -> some View {
+        switch line {
+        case .speaker(let spoken):
+            // The shared row (the agent chat uses it too). No `.textSelection`: on macOS it hosts an
+            // AppKit selection view per line, and every one of them is repositioned on each scroll
+            // frame (WOR-420). Copy is a right-click.
+            let isMine = context.actor?.isMe == true
+            ConversationMessageRow(context: context) {
+                Text(spoken.text)
+                    .font(.system(size: 16))
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, isMine ? ConversationMetrics.cardHorizontalPadding : 0)
+                    .padding(.vertical, isMine ? ConversationMetrics.cardVerticalPadding : 0)
+            }
+            .contextMenu { copyButton(spoken.text) }
+        case .systemEvent(let event):
+            systemEventCard(for: event)
+        }
+    }
+
+    private func copyButton(_ text: String) -> some View {
+        Button("Copy") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
     }
 
     /// A system-event entry as a CENTERED, visually distinct card. The image
@@ -1512,24 +1514,26 @@ private struct RecordingTileView: View {
                 Text(ocr)
                     .font(.system(size: DT.f11))
                     .foregroundStyle(DT.textSecondary)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.center)
                     .lineLimit(6)
+                    .contextMenu { copyButton(ocr) }
             }
-            if let parsedDate = parseISO8601(entry.ts) {
+            if let parsedDate = entry.date {
                 Text(parsedDate, style: .time)
                     .font(.system(size: DT.f10))
                     .foregroundStyle(DT.textTertiary)
             }
         }
-        .padding(.horizontal, DT.s16)
-        .padding(.vertical, DT.s12)
-        .frame(maxWidth: .infinity)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(10)
         .padding(.horizontal, DT.s12)
-        .padding(.vertical, DT.s4)
+        .padding(.vertical, DT.s8)
+        .frame(maxWidth: .infinity)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+        )
+        // The centred system card of the shared conversation layout: three quarters of the row.
+        .padding(.horizontal, 48)
     }
 
     private var emptyState: some View {
