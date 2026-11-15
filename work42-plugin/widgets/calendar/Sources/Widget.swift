@@ -25,7 +25,11 @@
 // CalEvent / CalMode mirrors, refreshing on a ~2s timer while mounted (the CLI
 // poll replaces the app store's db-mtime poller).
 
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import Foundation
 import Observation
 import SwiftUI
@@ -1247,8 +1251,7 @@ struct EventDetailPopover: View {
                 }
                 Spacer(minLength: 0)
                 Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                    SystemWidgetPlatformService().copy(url.absoluteString)
                 } label: { Image(systemName: "doc.on.doc") }
                     .glassIconButton()
                     .help("Copy link")
@@ -1338,7 +1341,7 @@ struct EventDetailPopover: View {
             HStack(spacing: DT.s8) {
                 if let link, let url = URL(string: link) {
                     Button {
-                        NSWorkspace.shared.open(url)
+                        SystemWidgetPlatformService().open(url)
                     } label: {
                         Label("Join meeting", systemImage: "video.fill").lineLimit(1).fixedSize()
                     }
@@ -1372,7 +1375,7 @@ struct EventDetailPopover: View {
         case .assisted:
             if let sessionId {
                 Button {
-                    if let url = URL(string: "work42://session/\(sessionId)") { NSWorkspace.shared.open(url) }
+                    if let url = URL(string: "work42://session/\(sessionId)") { SystemWidgetPlatformService().open(url) }
                 } label: {
                     Label("Open session in Work42", systemImage: "arrow.up.forward.app").lineLimit(1).fixedSize()
                 }
@@ -1628,12 +1631,27 @@ let meetingDetectionPurple = Color(red: 0x7C / 255, green: 0x3A / 255, blue: 0xE
 /// Lighter violet for the on-dark countdown copy (#C4B5FD).
 let meetingDetectionPurpleLight = Color(red: 0xC4 / 255, green: 0xB5 / 255, blue: 0xFD / 255)
 
-private func meetingAppIcon(bundleId: String) -> NSImage? {
+private func meetingAppIcon(bundleId: String) -> PlatformImage? {
+    #if os(macOS)
     guard !bundleId.isEmpty,
           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
     else { return nil }
     return NSWorkspace.shared.icon(forFile: url.path)
+    #else
+    // An iPad has no copy of the Mac's meeting app to take the icon from.
+    return nil
+    #endif
 }
+
+/// A process the call-detection agent started and may have to stop. `Process` exists only on macOS, and everything that
+/// starts one runs on the Mac (this agent is a Mac background agent), so on iOS this is an inert stand-in.
+#if os(macOS)
+private typealias WatchedProcess = Process
+#else
+private final class WatchedProcess {
+    func terminate() {}
+}
+#endif
 
 /// A resolved detection the agent hands to the pill. Carries the display data +
 /// two callbacks the pill invokes (Record now / Skip) so the side effects stay
@@ -1975,7 +1993,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
     @ObservationIgnored private var services: WidgetBackgroundServices?
     @ObservationIgnored private var watchTask: Task<Void, Never>?
-    @ObservationIgnored private var watchProcess: Process?
+    @ObservationIgnored private var watchProcess: WatchedProcess?
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
@@ -2103,6 +2121,10 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     /// — it's bounded to a 10s timeout and `watch` never exits on its own) and
     /// consume its line-delimited JSON stdout until it dies, then return so the
     /// caller's loop respawns it.
+    #if !os(macOS)
+    /// The call-detection watcher is a process on the Mac; this agent only runs there.
+    private func runWatchOnce(_ s: WidgetBackgroundServices) async {}
+    #else
     private func runWatchOnce(_ s: WidgetBackgroundServices) async {
         let (exe, args) = Self.meet42Invocation(verb: "watch")
         let process = Process()
@@ -2127,6 +2149,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         }
         watchProcess = nil
     }
+    #endif
 
     private func handleWatchLine(_ line: String, _ s: WidgetBackgroundServices) async {
         guard let data = line.data(using: .utf8),
@@ -2345,6 +2368,12 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         case refused(RecordStartRefusal)
     }
 
+    #if !os(macOS)
+    /// Launching the recorder is a process on the Mac; this agent only runs there.
+    private static func fireRecordStart(
+        app: String, bundleId: String, ownerPid: Int32
+    ) async -> RecordStartOutcome? { nil }
+    #else
     /// Launch the daemonizing recorder and await only its first JSON line.
     private static func fireRecordStart(
         app: String, bundleId: String, ownerPid: Int32
@@ -2378,6 +2407,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         process.terminate()
         return nil
     }
+    #endif
 
     /// "Chrome — Oct 2, 2:14 PM" — the name fed to the `session_start`
     /// tool for an ad-hoc mint. Must be unique per call (not just per app)
@@ -3004,6 +3034,15 @@ private struct CalendarPillView: View {
     }
 }
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { CalendarWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 // MARK: - Widget entry-point ABI
 
 @_cdecl("work42_widget_sdk_version")
@@ -3017,3 +3056,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     }
     return result
 }
+#endif

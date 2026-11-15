@@ -32,9 +32,12 @@ import Work42PluginKit
 
 // MARK: - Annotations file I/O (local AnnotationsStore replacement)
 
+/// The notes file's name inside the session folder.
+private let annotationsFileName = "annotations.md"
+
 /// Absolute path to `annotations.md` inside the session dir.
 private func annotationsPath(sessionDir: String) -> String {
-    (sessionDir as NSString).appendingPathComponent("annotations.md")
+    (sessionDir as NSString).appendingPathComponent(annotationsFileName)
 }
 
 /// Read the current annotations, or "" when the file is absent/unreadable.
@@ -112,7 +115,12 @@ final class AnnotationsWidget: Work42Widget, Work42WidgetPill {
     var minSize: WidgetMinSize { WidgetMinSize(width: 220, height: 160) }
 
     func makeView(services: SessionServices) -> AnyView {
+        #if os(macOS)
         AnyView(AnnotationsWidgetView(sessionDir: services.worktreePath ?? ""))
+        #else
+        // Not the Mac: the notes file is on the Mac, so it is read through `services.files`.
+        AnyView(AnnotationsRemoteView(services: services))
+        #endif
     }
 
     // MARK: Work42WidgetPill
@@ -252,6 +260,96 @@ private struct AnnotationsWidgetView: View {
     }
 }
 
+#if !os(macOS)
+// MARK: - AnnotationsRemoteView (a device that is not the Mac)
+
+/// My Notes on an iPad: the notes live in `annotations.md` in the session folder on the Mac, so this reads that file
+/// through `services.files` and follows its changes. It is read-only: the Mac writes the file, and the agent reads it
+/// from there.
+private struct AnnotationsRemoteView: View {
+
+    let services: SessionServices
+
+    @State private var text = ""
+    @State private var loaded = false
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: DT.s8) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: DT.f11, weight: .medium))
+                    .foregroundStyle(DT.textTertiary)
+                Text("MY NOTES")
+                    .font(.system(size: DT.f9, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(DT.textTertiary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, DT.s12)
+            .padding(.vertical, DT.s8)
+            Divider().opacity(0.4)
+            content
+        }
+        .task { await follow() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let failure {
+            Text(failure)
+                .font(.system(size: DT.f12))
+                .foregroundStyle(DT.textTertiary)
+                .padding(DT.s16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else if loaded && text.isEmpty {
+            Text("No notes yet. Notes are written on the Mac and appear here.")
+                .font(.system(size: DT.f13))
+                .foregroundStyle(DT.textTertiary)
+                .padding(.horizontal, DT.s16)
+                .padding(.vertical, DT.s12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            ScrollView {
+                Text(text)
+                    .font(.system(size: DT.f13))
+                    .textSelection(.enabled)
+                    .padding(.horizontal, DT.s12)
+                    .padding(.vertical, DT.s8)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    /// Reads the file now and again whenever the Mac reports it changed, until the view goes away.
+    private func follow() async {
+        await load()
+        for await _ in services.files.watch(annotationsFileName) {
+            await load()
+        }
+    }
+
+    private func load() async {
+        do {
+            let data = try await services.files.read(annotationsFileName)
+            text = String(decoding: data, as: UTF8.self)
+            failure = nil
+        } catch let error as WidgetServiceError {
+            // The file does not exist until the first note is written: that is the empty state, not a failure.
+            if error.message.hasPrefix("no such file") {
+                text = ""
+                failure = nil
+            } else {
+                failure = error.errorDescription ?? error.message
+            }
+        } catch {
+            failure = error.localizedDescription
+        }
+        loaded = true
+    }
+}
+#endif
+
 // MARK: - AnnotationsPillView (compact editor)
 
 /// Compact pill rendering: the editor without the header chrome. Same
@@ -320,6 +418,15 @@ private struct AnnotationsPillView: View {
     }
 }
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { AnnotationsWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 // MARK: - Widget entry-point ABI
 
 @_cdecl("work42_widget_sdk_version")
@@ -333,3 +440,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     }
     return result
 }
+#endif

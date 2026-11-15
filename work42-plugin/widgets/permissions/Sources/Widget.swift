@@ -14,12 +14,25 @@
 //
 // Links only Work42PluginKit + Work42UI.
 
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import Foundation
 import Observation
 import SwiftUI
 import Work42UI
 import Work42PluginKit
+
+/// Posted when the app comes back to the front: the cue to re-read the permissions after a visit to System Settings.
+private let appDidBecomeActive: Notification.Name = {
+    #if os(macOS)
+    NSApplication.didBecomeActiveNotification
+    #else
+    UIApplication.didBecomeActiveNotification
+    #endif
+}()
 
 // MARK: - Model (local mirror of `meet42 permissions --json`)
 
@@ -230,7 +243,7 @@ private struct PermissionsBody: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await model.refresh() }
         // A permission switched on in System Settings shows up as soon as the user comes back.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: appDidBecomeActive)) { _ in
             Task { await model.refresh() }
         }
     }
@@ -383,6 +396,15 @@ private struct FailedView: View {
 
 // MARK: - Entry points
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { PermissionsWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 @_cdecl("work42_widget_sdk_version")
 public func work42_widget_sdk_version() -> Int32 { WidgetSDK.abiVersion }
 
@@ -392,3 +414,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     MainActor.assumeIsolated { result = WidgetEntryPoint.register(PermissionsWidget()) }
     return result
 }
+#endif

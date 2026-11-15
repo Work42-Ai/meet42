@@ -27,7 +27,11 @@
 // `WidgetShellService`, which is bounded to 10s and would kill the
 // never-exiting daemon), confirmed via a bounded `meet42 record status` poll.
 
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import CoreGraphics
 import Foundation
 import Observation
@@ -498,6 +502,11 @@ private enum RecordingStartOutcome {
 /// session's storage pointer — mirrors the calendar widget's
 /// `fireRecordStart`: redirect to a temp file and poll for the line to
 /// appear (NOT for the process to exit, since it deliberately never does).
+#if !os(macOS)
+/// Starting a recording launches a process, which only the Mac can do: an iPad sends the Record intent to the Mac, which
+/// runs the macOS version below. This stub only lets the widget compile for iOS.
+private func fireRecordingRecordStart() async -> RecordingStartOutcome { .unavailable }
+#else
 private func fireRecordingRecordStart() async -> RecordingStartOutcome {
     let (exe, args) = recordingMeet42Invocation(
         verb: "record", extraArgs: ["start", "--manual", "--json"]
@@ -546,8 +555,19 @@ private func fireRecordingRecordStart() async -> RecordingStartOutcome {
     }
     return .unavailable
 }
+#endif
 
 // MARK: - Active meeting ownership
+
+/// A process this model started and may have to stop. `Process` exists only on macOS, and everything that starts one
+/// runs on the Mac (the active-meeting agent is a Mac background agent), so on iOS this is an inert stand-in.
+#if os(macOS)
+private typealias WatchedProcess = Process
+#else
+private final class WatchedProcess {
+    func terminate() {}
+}
+#endif
 
 @Observable
 @MainActor
@@ -559,7 +579,7 @@ private final class RecordingMeetingModel {
     var title = "Meeting"
     var sourceApp = "Meeting"
     var sourceBundleId: String?
-    var sourceIcon: NSImage?
+    var sourceIcon: PlatformImage?
     var recordingDir: String?
     var startedAt: Date?
     var scheduledStart: Date?
@@ -571,7 +591,7 @@ private final class RecordingMeetingModel {
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private let countdownTask = WidgetCountdownTask()
     @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
-    @ObservationIgnored private var watchProcess: Process?
+    @ObservationIgnored private var watchProcess: WatchedProcess?
     @ObservationIgnored private var watchedBundleId: String?
     @ObservationIgnored private var suppressCloseUntilOpen = false
     @ObservationIgnored private var completionAttempted = false
@@ -685,11 +705,16 @@ private final class RecordingMeetingModel {
         }
     }
 
-    private static func icon(bundleId: String?) -> NSImage? {
+    private static func icon(bundleId: String?) -> PlatformImage? {
+        #if os(macOS)
         guard let bundleId,
               let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
         else { return nil }
         return NSWorkspace.shared.icon(forFile: appURL.path)
+        #else
+        // An iPad has no copy of the Mac's meeting app to take the icon from.
+        return nil
+        #endif
     }
 
     private func startWatchIfNeeded() {
@@ -729,6 +754,10 @@ private final class RecordingMeetingModel {
         heartbeatTask = nil
     }
 
+    #if !os(macOS)
+    /// The call-detection watcher is a process on the Mac; this model only runs there.
+    private func runWatchOnce(bundleId: String) async {}
+    #else
     private func runWatchOnce(bundleId: String) async {
         let invocation = recordingMeet42Invocation(
             verb: "watch", extraArgs: ["--bundle-id", bundleId, "--json"]
@@ -748,6 +777,7 @@ private final class RecordingMeetingModel {
         }
         if watchProcess === process { watchProcess = nil }
     }
+    #endif
 
     private func handleWatchLine(_ line: String) async {
         guard let data = line.data(using: .utf8),
@@ -927,7 +957,12 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
 /// asked. The CLI call only refreshes the file.
 private enum MicCache {
     private static var directory: URL {
+        #if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/meet42")
+        #else
+        // Only the Mac's mic menu reads this cache; on iOS the path only has to be valid.
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".work42/meet42")
+        #endif
     }
 
     static func write(_ rows: [[String: Any]]) {
@@ -1756,6 +1791,15 @@ private struct RecordingAccessory: View {
     }
 }
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { RecordingWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 // MARK: - Widget entry-point ABI
 
 @_cdecl("work42_widget_sdk_version")
@@ -1769,3 +1813,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     }
     return result
 }
+#endif
