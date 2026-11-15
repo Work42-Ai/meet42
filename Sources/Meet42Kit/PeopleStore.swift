@@ -169,6 +169,8 @@ public final class PeopleStore {
             )
         }
         self.db = handle
+        // Concurrent meet42 processes share this file; wait for the lock instead of failing at once (see CalendarStore).
+        sqlite3_busy_timeout(handle, 5_000)
         _ = sqlite3_exec(handle, "PRAGMA foreign_keys = ON", nil, nil, nil)
         try execBlock(Self.schema, label: "schema")
         try migrate()
