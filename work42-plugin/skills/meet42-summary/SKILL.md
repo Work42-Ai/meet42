@@ -1,14 +1,15 @@
 ---
 name: meet42-summary
 description: |
-  How to build the meeting summary: the "meeting-summary" artifact the Summary widget shows, in the same template
-  type as the brief (general, standup, refinement, 1:1 or external call), plus speaker attribution. Use it in the
-  Summary stage of a meet42 event session.
+  How to build the meeting summary: the "meeting-summary" artifact, shown as an artifact tile on the Recap tab, in the
+  same template type as the brief (general, standup, refinement, 1:1 or external call), plus speaker attribution. Use
+  it in the Summary stage of a meet42 event session.
 ---
 
 # meet42-summary — build the meeting summary
 
-The **Summary** widget shows one session artifact, `meeting-summary`, in the same visual family as the brief. The
+The Recap tab shows one session artifact, `meeting-summary`, as an artifact tile, in the same visual family as the
+brief. The tile is there, empty, until you write the artifact (`artifact_set`). The
 folder `templates/` next to this file has one template per kind of meeting (`general`, `standup`, `refinement`,
 `one-on-one`, `external`) built from the Work42 design kit (Tailwind classes, `wk-*` recipes and SF Symbols).
 

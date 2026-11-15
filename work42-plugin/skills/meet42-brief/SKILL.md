@@ -1,16 +1,18 @@
 ---
 name: meet42-brief
 description: |
-  How to build the meeting brief: the "meeting-brief" artifact the Meeting brief widget shows, in the template that
-  fits the meeting (general, standup, refinement, 1:1 or external call). Use it in the Prepare for Meeting stage of
-  a meet42 event session.
+  How to build the meeting brief: the "meeting-brief" artifact, shown as an artifact tile on the Brief tab, in the
+  template that fits the meeting (general, standup, refinement, 1:1 or external call). Use it in the Prepare for
+  Meeting stage of a meet42 event session.
 ---
 
 # meet42-brief — build the meeting brief
 
-The **Meeting brief** widget shows one session artifact, `meeting-brief`, full size. Your job in Prepare for Meeting
-is to write it so the user walks into the meeting prepared. Pick the template that fits the meeting, fill it with real
-content, and **drop sections that have nothing real in them**. A short, accurate brief beats a long padded one.
+The Brief tab shows one session artifact, `meeting-brief`, as an artifact tile, full size. The tile is there, empty,
+from the moment the event session is created, and it fills in when you write the artifact (`artifact_set`). Your job in
+Prepare for Meeting is to write it so the user walks into the meeting prepared. Pick the template that fits the
+meeting, fill it with real content, and **drop sections that have nothing real in them**. A short, accurate brief beats
+a long padded one.
 
 ## Pick the template
 
@@ -35,8 +37,10 @@ The brief's eyebrow names its type ("Standup brief"); the summary stage uses the
    print as JSON, so a string comes back in quotes; `tr -d '"'` strips them, and without it `meet42 show` finds no event.
    If `meeting/event_id` is unset this is an ad-hoc event: use `general`, say so in the hero, and skip the guest section.
 2. Gather context from the session's data sources **before you write anything**. Run `widget_list`: every
-   widget in it other than the meeting's own (chat, recording, brief, event details, summary, permissions, annotations)
-   is a data source, **whether it is open or closed** (an issue board, pull requests, docs). For each one, load its skill
+   widget in it other than the meeting's own (chat, recording, event details, permissions, annotations) is a data
+   source, **whether it is open or closed** (an issue board, pull requests, docs). An `artifact:<id>` entry, such as the
+   Brief and Recap tiles `artifact:meeting-brief` and `artifact:meeting-summary`, is one of this session's own
+   artifacts, never a data source. For each one, load its skill
    and run the commands it names (a CLI such as an issue tracker or a code host) to find the items that relate to this
    meeting. A source is unavailable only when those commands fail: an MCP connector that is not authorized is not a
    reason to skip a source whose CLI works. Do not assume which plugins exist. Say in the footer which sources you read
