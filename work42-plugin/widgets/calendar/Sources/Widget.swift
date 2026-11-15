@@ -218,6 +218,108 @@ final class CLICalendarStore {
     var viewMode: ViewMode = .week
     var referenceDate: Date = Date()
 
+    // MARK: Shared view (the Mac's calendar and an iPad's show the same window)
+
+    /// The view mode and date as shared through the widget's own storage (`view_state`). Every instance of this
+    /// calendar (the Mac's, and an iPad's) writes it when its mode or date changes and adopts a change another instance
+    /// made, so the Mac's action-area controls (Day / Week / Agenda, previous, today, next) move the calendar an iPad
+    /// draws too. Without it each instance would keep its own mode and date, and the controls would only reach the
+    /// Mac's.
+    private struct SharedView: Equatable {
+        let mode: ViewMode
+        let reference: Date
+        let writtenAt: Date
+
+        /// Dates are kept to the millisecond, which is what survives the trip through storage, so a value this
+        /// instance wrote compares equal to the same value read back.
+        init(mode: ViewMode, reference: Date, writtenAt: Date) {
+            self.mode = mode
+            self.reference = Self.millisecond(reference)
+            self.writtenAt = Self.millisecond(writtenAt)
+        }
+
+        init?(json: WidgetJSONValue?) {
+            guard case .object(let object)? = json,
+                  case .string(let rawMode)? = object["mode"], let mode = ViewMode(rawValue: rawMode),
+                  case .string(let rawReference)? = object["reference"], let reference = Self.formatter.date(from: rawReference),
+                  case .string(let rawWritten)? = object["written_at"], let written = Self.formatter.date(from: rawWritten)
+            else { return nil }
+            self.init(mode: mode, reference: reference, writtenAt: written)
+        }
+
+        var json: WidgetJSONValue {
+            .object([
+                "mode": .string(mode.rawValue),
+                "reference": .string(Self.formatter.string(from: reference)),
+                "written_at": .string(Self.formatter.string(from: writtenAt)),
+            ])
+        }
+
+        private static var formatter: ISO8601DateFormatter {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }
+
+        private static func millisecond(_ date: Date) -> Date {
+            Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded() / 1000)
+        }
+    }
+
+    private static let sharedViewKey = "view_state"
+    /// The widget's own namespace (its id), which is where `services.storage.set` writes. If the plugin loader renamed the
+    /// widget's slug (another plugin already had `calendar`), reads find nothing and the calendar behaves as it did.
+    private static let sharedViewNamespace = "calendar"
+    /// A shared state written this recently is what another device is showing right now, so an instance that starts
+    /// begins from it. An older one is a view someone left yesterday: the calendar starts on this week, as it always did.
+    private static let sharedViewFreshness: TimeInterval = 600
+
+    /// The last shared state this instance wrote or read: a different one in storage means another instance changed it.
+    @ObservationIgnored private var lastShared: SharedView?
+    /// Counts this instance's own changes, so a read that began before a change cannot undo it.
+    @ObservationIgnored private var localRevision = 0
+    @ObservationIgnored private var writesInFlight = 0
+    @ObservationIgnored private var sharedViewBaselined = false
+
+    /// This instance changed the mode or date: share it.
+    private func localViewChanged() {
+        localRevision += 1
+        let shared = SharedView(mode: viewMode, reference: referenceDate, writtenAt: Date())
+        lastShared = shared
+        writesInFlight += 1
+        let storage = services.storage
+        Task {
+            try? await storage.set(key: Self.sharedViewKey, value: shared.json)
+            writesInFlight -= 1
+        }
+    }
+
+    /// Adopts a change another instance shared. Called at the start of every refresh (the ~2 s poll).
+    private func adoptSharedView() async {
+        let revision = localRevision
+        let value = try? await services.storage.get(namespace: Self.sharedViewNamespace, key: Self.sharedViewKey)
+        // The answer is stale when this instance changed (or is still writing) since the read began: keep its own tap.
+        guard revision == localRevision, writesInFlight == 0 else { return }
+        guard let remote = SharedView(json: value) else {
+            sharedViewBaselined = true   // nothing shared yet, or storage is not available here
+            return
+        }
+        if !sharedViewBaselined {
+            sharedViewBaselined = true
+            lastShared = remote
+            if Date().timeIntervalSince(remote.writtenAt) < Self.sharedViewFreshness { apply(remote) }
+            return
+        }
+        guard remote != lastShared else { return }
+        lastShared = remote
+        apply(remote)
+    }
+
+    private func apply(_ shared: SharedView) {
+        viewMode = shared.mode
+        referenceDate = shared.reference
+    }
+
     @ObservationIgnored private let services: SessionServices
     @ObservationIgnored private var timer: Timer?
 
@@ -286,6 +388,7 @@ final class CLICalendarStore {
         case .week: referenceDate = cal.date(byAdding: .day, value: -7, to: referenceDate) ?? referenceDate
         case .agenda: return
         }
+        localViewChanged()
         Task { await refresh() }
     }
 
@@ -296,17 +399,20 @@ final class CLICalendarStore {
         case .week: referenceDate = cal.date(byAdding: .day, value: 7, to: referenceDate) ?? referenceDate
         case .agenda: return
         }
+        localViewChanged()
         Task { await refresh() }
     }
 
     func goToToday() {
         referenceDate = Date()
+        localViewChanged()
         Task { await refresh() }
     }
 
     func setViewMode(_ mode: ViewMode) {
         guard mode != viewMode else { return }
         viewMode = mode
+        localViewChanged()
         Task { await refresh() }
     }
 
@@ -356,6 +462,7 @@ final class CLICalendarStore {
         // Taken before the reads, so a change landing while they run is picked up next tick.
         lastSignature = Self.storeSignature()
         lastRefresh = Date()
+        await adoptSharedView()
         let (from, to) = window
         let iso = ISO8601DateFormatter()
         let listCmd = "meet42 list --from \(calShellQuote(iso.string(from: from)))"
