@@ -5,8 +5,9 @@ description: >
   The meeting vertical, extracted from work42 into a first-party plugin
   (meet42-plugin-conversion, M2). Provides the `meeting` workflow (Prepare for
   Meeting -> In Meeting -> Summary -> Done, driven entirely by recording-
-  lifecycle storage signals), the `event` session type, the event-details /
-  recording / annotations / summary / calendar widgets
+  lifecycle storage signals), the `event` session type (its Brief and Recap tabs show the
+  `meeting-brief` and `meeting-summary` artifacts as artifact tiles), the event-details /
+  recording / annotations / calendar widgets
   (which render over files in the session dir + the standalone `meet42` CLI's
   verbs), the recording widget's active-meeting background agent, the calendar
   widget's mic-open detection + background-session handoff and scheduler reconciler, the `meet42-prep`
