@@ -74,8 +74,8 @@ struct Meet42WidgetsTests {
     @MainActor
     func artifactsAreNotWidgets() {
         for id in ["brief", "summary", "people"] {
-            #expect(Meet42Widget.normalizedID(id) == nil, id)
-            #expect(Meet42Widget.rootView(id: id, services: services()) == nil, id)
+            #expect(Meet42Widget.normalizedID(id) == nil, "\(id)")
+            #expect(Meet42Widget.rootView(id: id, services: services()) == nil, "\(id)")
         }
     }
 

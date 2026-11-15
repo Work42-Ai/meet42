@@ -184,7 +184,6 @@ private func speakersPath(sessionDir: String) -> String {
     (sessionDir as NSString).appendingPathComponent("speakers.json")
 }
 
-#if !os(macOS)
 /// Parse the text of the transcript (`meet42 transcript`, one JSON line per row) line by line; empty when undecodable.
 private func parseConversation(raw: String) -> [RecordingLine] {
     raw
@@ -192,7 +191,6 @@ private func parseConversation(raw: String) -> [RecordingLine] {
         .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         .compactMap { RecordingLine(jsonString: $0) }
 }
-#endif
 
 /// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
 /// `{ "<key>": "<Name>" }` shape and the rich
@@ -1588,8 +1586,12 @@ private struct RecordingTileView: View {
 
     private func copyButton(_ text: String) -> some View {
         Button("Copy") {
+            #if os(macOS)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            #else
+            UIPasteboard.general.string = text
+            #endif
         }
     }
 
