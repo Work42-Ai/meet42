@@ -135,7 +135,7 @@ if hasSDK {
     ))
     targets.append(.testTarget(
         name: "Meet42WidgetsTests",
-        dependencies: ["Meet42Widgets", .target(name: "Meet42CalendarWidget")] + sdkDependencies,
+        dependencies: ["Meet42Widgets", .target(name: "Meet42CalendarWidget"), .target(name: "Meet42AnnotationsWidget")] + sdkDependencies,
         path: "Tests/Meet42WidgetsTests",
         swiftSettings: widgetSettings
     ))

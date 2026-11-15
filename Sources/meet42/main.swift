@@ -35,6 +35,7 @@ enum Dispatcher {
         case "sync":     await SyncCommand.sync(args: args)
         case "record":   await RecordCommand.record(args: args)
         case "transcript": TranscriptCommand.transcript(args: args)
+        case "notes":    NotesCommand.notes(args: args)
         case "trace":    TraceCommand.trace(args: args)
         case "version", "--version", "-v":
             print("meet42 v\(meet42Version)")
@@ -134,6 +135,12 @@ enum Dispatcher {
                 verbatim, `speakers` absent until the end-of-meeting
                 attribution writes it. Lets a device that is not this Mac
                 (the iPad app) show the live transcript.
+          notes write --base64 <payload> [--dir <folder>] [--json]
+                Replace the session's My Notes file (annotations.md) with the
+                base64-decoded text; an empty payload clears it. --dir defaults
+                to the current directory (the session folder when Work42 runs
+                it). Lets a device that is not this Mac (the iPad app) save
+                notes. Only annotations.md is ever written.
 
         Diagnostics:
           trace [--tail N] [--call <callId>] [--json]
