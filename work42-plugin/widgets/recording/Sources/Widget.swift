@@ -184,12 +184,30 @@ private func speakersPath(sessionDir: String) -> String {
     (sessionDir as NSString).appendingPathComponent("speakers.json")
 }
 
+#if !os(macOS)
+/// Parse the text of the transcript (`meet42 transcript`, one JSON line per row) line by line; empty when undecodable.
+private func parseConversation(raw: String) -> [RecordingLine] {
+    raw
+        .components(separatedBy: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        .compactMap { RecordingLine(jsonString: $0) }
+}
+#endif
+
 /// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
 /// `{ "<key>": "<Name>" }` shape and the rich
 /// `{ "<key>": { "name": "<Name>", "email": "<email>", "person_id": "<id>" } }` shape (`email` and `person_id` optional).
 private func loadSpeakers(sessionDir: String) -> [String: ResolvedSpeaker] {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: speakersPath(sessionDir: sessionDir))),
-          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: speakersPath(sessionDir: sessionDir))) else {
+        return [:]
+    }
+    return parseSpeakers(data: data)
+}
+
+/// Parse the contents of `speakers.json`. Accepts the flat `{ "<key>": "<Name>" }` shape and the rich
+/// `{ "<key>": { "name": "<Name>", "email": "<email>", "person_id": "<id>" } }` shape (`email` and `person_id` optional).
+private func parseSpeakers(data: Data) -> [String: ResolvedSpeaker] {
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         return [:]
     }
     var out: [String: ResolvedSpeaker] = [:]
@@ -201,6 +219,28 @@ private func loadSpeakers(sessionDir: String) -> [String: ResolvedSpeaker] {
         }
     }
     return out
+}
+
+/// What `meet42 transcript --dir <dir> --json` prints: a recording's two transcript files, verbatim.
+private struct RecordingTranscriptPayload: Decodable {
+    let conversation: String
+    let speakers: String?
+}
+
+/// The transcript of the recording in `dir`, asked of the Mac with `meet42 transcript`. A device that is not the Mac cannot
+/// read the recording's files itself: they are in `~/.work42/meet42/recordings/`, outside the session folder. Nil when the
+/// Mac did not answer (the next poll tries again).
+private func fetchRemoteTranscript(
+    dir: String, services: SessionServices
+) async -> (lines: [RecordingLine], speakers: [String: ResolvedSpeaker])? {
+    guard let result = try? await services.shell.run(
+              command: "meet42 transcript --dir \(recordingShellQuote(dir)) --json"),
+          result.exitCode == 0,
+          let data = result.stdout.data(using: .utf8),
+          let payload = try? JSONDecoder().decode(RecordingTranscriptPayload.self, from: data)
+    else { return nil }
+    let speakers = payload.speakers.flatMap { $0.data(using: .utf8) }.map(parseSpeakers) ?? [:]
+    return (parseConversation(raw: payload.conversation), speakers)
 }
 
 // MARK: - WidgetFileWatcher (local FileWatcher reimplementation)
@@ -1335,6 +1375,11 @@ private struct RecordingTileView: View {
     @State private var speakersWatcher = WidgetFileWatcher()
     /// `speakers.json`, re-read only when the watcher sees it change (not on every transcript update).
     @State private var speakers: [String: ResolvedSpeaker] = [:]
+    #if !os(macOS)
+    /// The transcript as the Mac last answered it (`meet42 transcript`): this device cannot read the recording's files.
+    @State private var remoteLines: [RecordingLine] = []
+    @State private var remoteSpeakers: [String: ResolvedSpeaker] = [:]
+    #endif
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
     /// lifecycle-rework s1: `meet42 record` owns its own store). nil until
@@ -1355,9 +1400,14 @@ private struct RecordingTileView: View {
     }
 
     var body: some View {
+        #if os(macOS)
         // `tail.lines` is observed, and `speakers` reloads when the watcher bumps its version, so the
         // body re-runs when either the transcript or the speaker names change.
         let lines = tail.lines
+        #else
+        let lines = remoteLines
+        let speakers = remoteSpeakers
+        #endif
 
         return Group {
             if lines.isEmpty {
@@ -1402,6 +1452,7 @@ private struct RecordingTileView: View {
                 }
             }
         }
+        #if os(macOS)
         .onChange(of: recordingDir) { _, newDir in
             guard let newDir else { return }
             tail.start(path: conversationPath(sessionDir: newDir))
@@ -1422,6 +1473,19 @@ private struct RecordingTileView: View {
             tail.stop()
             speakersWatcher.stop()
         }
+        #else
+        // Not the Mac: ask the Mac for the transcript every 2 s while this tile shows, as the Mac's own watcher does.
+        .task(id: recordingDir) {
+            guard let dir = recordingDir else { return }
+            while !Task.isCancelled {
+                if let transcript = await fetchRemoteTranscript(dir: dir, services: services) {
+                    remoteLines = transcript.lines
+                    remoteSpeakers = transcript.speakers
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        #endif
     }
 
     /// The permission page that fixes `reason`, or nil when the failure is not a permission one.

@@ -34,6 +34,7 @@ enum Dispatcher {
         case "permissions": await PermissionsCommand.permissions(args: args)
         case "sync":     await SyncCommand.sync(args: args)
         case "record":   await RecordCommand.record(args: args)
+        case "transcript": TranscriptCommand.transcript(args: args)
         case "trace":    TraceCommand.trace(args: args)
         case "version", "--version", "-v":
             print("meet42 v\(meet42Version)")
@@ -127,6 +128,12 @@ enum Dispatcher {
                 Print whether a recording is active and, if so, its
                 recordingId/dir/app/startedAt/ownerPid — the single source of truth
                 every surface reads instead of session storage.
+          transcript --dir <dir> [--json]
+                Read-only. A recording's conversation.jsonl and speakers.json.
+                --json prints {"dir","conversation","speakers"}: the files
+                verbatim, `speakers` absent until the end-of-meeting
+                attribution writes it. Lets a device that is not this Mac
+                (the iPad app) show the live transcript.
 
         Diagnostics:
           trace [--tail N] [--call <callId>] [--json]
