@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# release.sh — build, sign, notarize and (optionally) publish a meet42 release.
+# release.sh — build, sign and notarize a meet42 candidate for embedding in Work42.
 #
 #   scripts/release.sh <version>             build + sign + notarize a candidate in dist/<version>/
 #   scripts/release.sh <version> --check     report readiness only; changes nothing
-#   scripts/release.sh <version> --publish   also create GitHub release v<version> with the assets
 #
-# The release is two assets, served from fixed URLs:
-#   https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip
-#   https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip.sha256
-# meet42.zip holds the signed, notarized meet42.app (a small window-less app bundle; the CLI is its executable).
+# meet42 is distributed only inside Work42: the app build (app/scripts/embed-builtin-plugins.sh) checks this repo out at the
+# tag pinned in app/BuiltInPlugins.json and builds it with scripts/build-meet42.sh. Nothing is published from here and there is
+# no standalone download. This script is the local verification: it proves a tag signs, notarizes, staples and runs.
+# dist/<version>/meet42.zip is a local artifact only.
 #
 # Credentials come from the environment or an untracked .env.release.local (see .env.release.example):
 #   WORK42_DEVELOPER_ID_APPLICATION  a "Developer ID Application: …" identity in the login Keychain
@@ -21,17 +20,16 @@ REPO_SLUG="Work42-Ai/meet42"
 
 die() { echo "error: $*" >&2; exit 1; }
 
-version="" ; check_only=false ; publish=false
+version="" ; check_only=false
 for arg in "$@"; do
   case "$arg" in
     --check) check_only=true ;;
-    --publish) publish=true ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     -*) die "unknown option $arg" ;;
     *) [[ -z "$version" ]] || die "only one version expected"; version="$arg" ;;
   esac
 done
-[[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--check] [--publish]"
+[[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--check]"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "version must look like 1.2.3"
 
 if [[ -f .env.release.local ]]; then
@@ -78,18 +76,15 @@ synced_with_origin() {
   git fetch --quiet origin main && [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]
 }
 version_in_source() { grep -Fq "let meet42Version = \"$version\"" Sources/meet42/main.swift; }
-release_unused() { ! gh release view "v$version" --repo "$REPO_SLUG"; }
 
 readiness_report() {
   printf 'meet42 %s release readiness\n' "$version"
   check "Developer ID Application identity in the login Keychain" has_identity
   check "Apple notarization credentials" has_notary_credentials
-  check "GitHub authentication (gh)" gh auth status
   check "origin is $REPO_SLUG" canonical_origin
   check "clean checkout of main" clean_main
   check "main is up to date with origin" synced_with_origin
   check "Sources/meet42/main.swift says version $version" version_in_source
-  check "release v$version does not exist yet" release_unused
   printf '\nSummary: %s ready, %s blocked\n' "$ready" "$blocked"
   [[ "$blocked" -eq 0 ]]
 }
@@ -138,17 +133,4 @@ spctl --assess --type execute --verbose=2 "$check_dir/meet42.app"
 "$check_dir/meet42.app/Contents/MacOS/meet42" --version
 
 echo
-echo "Candidate ready in $out/ (meet42.zip, meet42.zip.sha256)."
-if [[ "$publish" != true ]]; then
-  echo "Re-run with --publish to create GitHub release v$version."
-  exit 0
-fi
-
-# ---- publish ------------------------------------------------------------------------------------
-
-echo "==> publish v$version to $REPO_SLUG"
-gh release create "v$version" "$out/meet42.zip" "$out/meet42.zip.sha256" \
-  --repo "$REPO_SLUG" --target "$(git rev-parse HEAD)" \
-  --title "meet42 $version" \
-  --notes "Signed and notarized meet42 $version. Install with the steps in the README, or let the meet42 plugin's skill do it."
-echo "Published: https://github.com/$REPO_SLUG/releases/tag/v$version"
+echo "Candidate ready in $out/ (meet42.zip, meet42.zip.sha256). Local only: meet42 ships inside Work42."

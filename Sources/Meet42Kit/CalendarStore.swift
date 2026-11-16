@@ -123,6 +123,9 @@ public final class CalendarStore {
             )
         }
         self.db = handle
+        // Several meet42 processes open this file at once (every widget of a session runs `meet42 …`, on the Mac and, through
+        // the remote bridge, for an iPad). Without a busy timeout a second writer fails at once with "database is locked".
+        sqlite3_busy_timeout(handle, 5_000)
         _ = sqlite3_exec(handle, "PRAGMA foreign_keys = ON", nil, nil, nil)
         try wipeStaleProjectTablesIfNeeded()
         try execBlock(Self.schema, label: "schema")
@@ -203,7 +206,11 @@ public final class CalendarStore {
     }
 
     private func stampSchemaVersion() throws {
-        try setSyncState("schema_version", value: String(Self.currentSchemaVersion))
+        // Only write when it changed: every `meet42` call opens the store, and a write on each open made concurrent
+        // read-only commands (`show`, `list`, `today`) fight over the database lock.
+        let current = String(Self.currentSchemaVersion)
+        if (try? rawSyncState("schema_version")) == current { return }
+        try setSyncState("schema_version", value: current)
     }
 
     private func migrate() throws {

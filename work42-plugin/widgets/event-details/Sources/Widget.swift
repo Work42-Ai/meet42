@@ -16,7 +16,11 @@
 //
 // The shared decoder, avatars and helpers live in work42-plugin/shared/MeetEvent.swift.
 
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import Foundation
 import Observation
 import SwiftUI
@@ -90,7 +94,7 @@ final class EventDetailsWidget: Work42Widget, Work42WidgetBackground {
                 isEnabled: { [weak self] in self?.joinURL() != nil },
                 livePeriodicTick: 30,
                 perform: { [weak self] in
-                    if let url = self?.joinURL() { NSWorkspace.shared.open(url) }
+                    if let url = self?.joinURL() { SystemWidgetPlatformService().open(url) }
                 }
             ),
         ]
@@ -304,8 +308,7 @@ private struct EventCard: View {
                 }
                 Spacer(minLength: 0)
                 Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(link, forType: .string)
+                    SystemWidgetPlatformService().copy(link)
                 } label: { Image(systemName: "doc.on.doc") }
                     .glassIconButton()
                     .help("Copy link")
@@ -447,6 +450,15 @@ private struct EventCard: View {
     }
 }
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { EventDetailsWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 @_cdecl("work42_widget_sdk_version")
 public func work42_widget_sdk_version() -> Int32 { WidgetSDK.abiVersion }
 
@@ -458,3 +470,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     }
     return result
 }
+#endif

@@ -32,9 +32,12 @@ import Work42PluginKit
 
 // MARK: - Annotations file I/O (local AnnotationsStore replacement)
 
+/// The notes file's name inside the session folder.
+private let annotationsFileName = "annotations.md"
+
 /// Absolute path to `annotations.md` inside the session dir.
 private func annotationsPath(sessionDir: String) -> String {
-    (sessionDir as NSString).appendingPathComponent("annotations.md")
+    (sessionDir as NSString).appendingPathComponent(annotationsFileName)
 }
 
 /// Read the current annotations, or "" when the file is absent/unreadable.
@@ -112,7 +115,12 @@ final class AnnotationsWidget: Work42Widget, Work42WidgetPill {
     var minSize: WidgetMinSize { WidgetMinSize(width: 220, height: 160) }
 
     func makeView(services: SessionServices) -> AnyView {
+        #if os(macOS)
         AnyView(AnnotationsWidgetView(sessionDir: services.worktreePath ?? ""))
+        #else
+        // Not the Mac: the notes file is on the Mac, so it is read through `services.files`.
+        AnyView(AnnotationsRemoteView(services: services))
+        #endif
     }
 
     // MARK: Work42WidgetPill
@@ -252,6 +260,214 @@ private struct AnnotationsWidgetView: View {
     }
 }
 
+// MARK: - RemoteNotesModel (a device that is not the Mac)
+
+/// My Notes on a device that is not the Mac: the notes are `annotations.md` in the session folder on the Mac. This reads that file
+/// through `services.files`, follows its changes, and saves what the person types by asking the Mac to write it
+/// (`meet42 notes write`), because a widget's file service is read-only. Everything here is plain logic over `SessionServices`, so
+/// it is tested on the Mac; only the editor view is iOS-only.
+///
+/// Two rules keep a person's typing safe: a change made elsewhere is taken in only while there is nothing unsaved here, and the
+/// text is kept when a save fails (the status says so and the next edit tries again).
+@MainActor
+@Observable
+final class RemoteNotesModel {
+
+    enum SaveState: Equatable {
+        case idle
+        case saving
+        case saved
+        case failed(String)
+    }
+
+    /// The editor's text.
+    var text = ""
+    /// The notes as the Mac last held them (what was last read, or last saved).
+    private(set) var savedText = ""
+    private(set) var loaded = false
+    /// Why the notes could not be read, when they could not.
+    private(set) var failure: String?
+    private(set) var saveState: SaveState = .idle
+
+    /// How long after the last keystroke the notes are saved.
+    var debounce: Duration = .seconds(1)
+    /// The most a note may be to send in one command: base64 characters (about 300 KB of text). Over it, the editor says so.
+    static let maxPayload = 400_000
+
+    private let services: SessionServices
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var saves = 0
+
+    init(services: SessionServices) { self.services = services }
+
+    var isDirty: Bool { text != savedText }
+
+    /// Reads the file now and again whenever the Mac reports it changed, until the task is cancelled.
+    func follow() async {
+        await load()
+        for await _ in services.files.watch(annotationsFileName) {
+            await load()
+        }
+    }
+
+    func load() async {
+        do {
+            let data = try await services.files.read(annotationsFileName)
+            adopt(String(decoding: data, as: UTF8.self))
+            failure = nil
+        } catch let error as WidgetServiceError {
+            // The file does not exist until the first note is written: that is the empty state, not a failure.
+            if error.message.hasPrefix("no such file") {
+                adopt("")
+                failure = nil
+            } else {
+                failure = error.errorDescription ?? error.message
+            }
+        } catch {
+            failure = error.localizedDescription
+        }
+        loaded = true
+    }
+
+    /// Takes in what the Mac holds, unless there are unsaved edits here or a save is under way.
+    private func adopt(_ remote: String) {
+        guard !isDirty, saveState != .saving, remote != text else {
+            if !isDirty { savedText = remote }
+            return
+        }
+        text = remote
+        savedText = remote
+    }
+
+    /// The editor's text changed: save it once typing pauses.
+    func textChanged() {
+        saveTask?.cancel()
+        guard isDirty else { return }
+        let wait = debounce
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: wait)
+            guard !Task.isCancelled else { return }
+            await self?.save()
+        }
+    }
+
+    /// Saves now. A save that finishes after the person typed more leaves the newer text unsaved, and it is saved in turn.
+    func save() async {
+        saveTask?.cancel()
+        let sending = text
+        guard sending != savedText else { return }
+        let payload = Data(sending.utf8).base64EncodedString()
+        guard payload.count <= Self.maxPayload else {
+            saveState = .failed("This note is too long to save from the iPad. Shorten it, or save it on your Mac.")
+            return
+        }
+        saves += 1
+        let attempt = saves
+        saveState = .saving
+        do {
+            let result = try await services.shell.run(command: "meet42 notes write --base64 '\(payload)'")
+            guard attempt == saves else { return }   // a newer save has taken over
+            guard result.exitCode == 0 else {
+                let said = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                saveState = .failed(said.isEmpty ? "meet42 couldn't save the notes (exit \(result.exitCode))." : said)
+                return
+            }
+            savedText = sending
+            saveState = .saved
+            if isDirty { textChanged() }
+        } catch {
+            guard attempt == saves else { return }
+            let reason = (error as? WidgetServiceError)?.errorDescription ?? error.localizedDescription
+            saveState = .failed(reason)
+        }
+    }
+}
+
+#if !os(macOS)
+// MARK: - AnnotationsRemoteView (a device that is not the Mac)
+
+private struct AnnotationsRemoteView: View {
+
+    @State private var model: RemoteNotesModel
+    @FocusState private var isFocused: Bool
+
+    init(services: SessionServices) {
+        _model = State(initialValue: RemoteNotesModel(services: services))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: DT.s8) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: DT.f11, weight: .medium))
+                    .foregroundStyle(DT.textTertiary)
+                Text("MY NOTES")
+                    .font(.system(size: DT.f9, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(DT.textTertiary)
+                Spacer(minLength: 0)
+                status
+            }
+            .padding(.horizontal, DT.s12)
+            .padding(.vertical, DT.s8)
+            Divider().opacity(0.4)
+            content
+        }
+        .task { await model.follow() }
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch model.saveState {
+        case .idle: EmptyView()
+        case .saving: Text("Saving\u{2026}").font(.system(size: DT.f9)).foregroundStyle(DT.textTertiary)
+        case .saved: Text("Saved").font(.system(size: DT.f9)).foregroundStyle(DT.textTertiary)
+        case .failed: Text("Not saved").font(.system(size: DT.f9, weight: .semibold)).foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let failure = model.failure, !model.loaded || model.text.isEmpty {
+            Text(failure)
+                .font(.system(size: DT.f12))
+                .foregroundStyle(DT.textTertiary)
+                .padding(DT.s16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            VStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    if model.loaded && model.text.isEmpty && !isFocused {
+                        Text("Jot personal notes \u{2014} captured here and readable by the agent.")
+                            .font(.system(size: DT.f13))
+                            .foregroundStyle(DT.textTertiary)
+                            .allowsHitTesting(false)
+                            .padding(.horizontal, DT.s16)
+                            .padding(.vertical, DT.s12)
+                    }
+                    TextEditor(text: $model.text)
+                        .focused($isFocused)
+                        .font(.system(size: DT.f13))
+                        .scrollContentBackground(.hidden)
+                        .padding(.horizontal, DT.s12)
+                        .padding(.vertical, DT.s8)
+                        .disabled(!model.loaded)
+                        .onChange(of: model.text) { model.textChanged() }
+                }
+                if case .failed(let reason) = model.saveState {
+                    Text(reason)
+                        .font(.system(size: DT.f11))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, DT.s12)
+                        .padding(.vertical, DT.s8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+}
+#endif
+
 // MARK: - AnnotationsPillView (compact editor)
 
 /// Compact pill rendering: the editor without the header chrome. Same
@@ -320,6 +536,15 @@ private struct AnnotationsPillView: View {
     }
 }
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { AnnotationsWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 // MARK: - Widget entry-point ABI
 
 @_cdecl("work42_widget_sdk_version")
@@ -333,3 +558,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     }
     return result
 }
+#endif

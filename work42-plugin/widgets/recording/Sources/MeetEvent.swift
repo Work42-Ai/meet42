@@ -265,7 +265,11 @@ struct MeetAvatarView: View {
         GlassAvatar(initials: initials, color: tint, size: size)
             .background {
                 if stacked {
+                    #if os(macOS)
                     Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(-2)
+                    #else
+                    Circle().fill(Color(uiColor: .systemBackground)).padding(-2)
+                    #endif
                 }
             }
     }

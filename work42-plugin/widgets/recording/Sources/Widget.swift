@@ -27,7 +27,11 @@
 // `WidgetShellService`, which is bounded to 10s and would kill the
 // never-exiting daemon), confirmed via a bounded `meet42 record status` poll.
 
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import CoreGraphics
 import Foundation
 import Observation
@@ -180,12 +184,28 @@ private func speakersPath(sessionDir: String) -> String {
     (sessionDir as NSString).appendingPathComponent("speakers.json")
 }
 
+/// Parse the text of the transcript (`meet42 transcript`, one JSON line per row) line by line; empty when undecodable.
+private func parseConversation(raw: String) -> [RecordingLine] {
+    raw
+        .components(separatedBy: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        .compactMap { RecordingLine(jsonString: $0) }
+}
+
 /// Load the optional `speakers.json` sidecar, written by the agent in the Summary stage. Accepts the flat
 /// `{ "<key>": "<Name>" }` shape and the rich
 /// `{ "<key>": { "name": "<Name>", "email": "<email>", "person_id": "<id>" } }` shape (`email` and `person_id` optional).
 private func loadSpeakers(sessionDir: String) -> [String: ResolvedSpeaker] {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: speakersPath(sessionDir: sessionDir))),
-          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: speakersPath(sessionDir: sessionDir))) else {
+        return [:]
+    }
+    return parseSpeakers(data: data)
+}
+
+/// Parse the contents of `speakers.json`. Accepts the flat `{ "<key>": "<Name>" }` shape and the rich
+/// `{ "<key>": { "name": "<Name>", "email": "<email>", "person_id": "<id>" } }` shape (`email` and `person_id` optional).
+private func parseSpeakers(data: Data) -> [String: ResolvedSpeaker] {
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         return [:]
     }
     var out: [String: ResolvedSpeaker] = [:]
@@ -197,6 +217,25 @@ private func loadSpeakers(sessionDir: String) -> [String: ResolvedSpeaker] {
         }
     }
     return out
+}
+
+/// What `meet42 transcript --dir <dir> --json` prints: a recording's two transcript files, verbatim.
+/// What the Mac pushes of a recording to a device that cannot read its files (the stream the host serves as `widget:recording`'s
+/// `transcript`): the newest whole lines of `conversation.jsonl`, exactly as the file holds them, and `speakers.json` as text.
+/// The lines then take the same path the Mac's own file read takes, `parseConversation` into the shared `ConversationView`.
+private struct RecordingTranscriptWire: Decodable {
+    static let widget = "widget:recording"
+    static let stream = "transcript"
+
+    let lines: [String]
+    let speakers: String?
+}
+
+/// The transcript in one state the Mac pushed; nil when it is not one this widget reads.
+private func decodeRemoteTranscript(_ data: Data) -> (lines: [RecordingLine], speakers: [String: ResolvedSpeaker])? {
+    guard let wire = try? JSONDecoder().decode(RecordingTranscriptWire.self, from: data) else { return nil }
+    let speakers = wire.speakers.flatMap { $0.data(using: .utf8) }.map(parseSpeakers) ?? [:]
+    return (parseConversation(raw: wire.lines.joined(separator: "\n")), speakers)
 }
 
 // MARK: - WidgetFileWatcher (local FileWatcher reimplementation)
@@ -498,6 +537,11 @@ private enum RecordingStartOutcome {
 /// session's storage pointer — mirrors the calendar widget's
 /// `fireRecordStart`: redirect to a temp file and poll for the line to
 /// appear (NOT for the process to exit, since it deliberately never does).
+#if !os(macOS)
+/// Starting a recording launches a process, which only the Mac can do: an iPad sends the Record intent to the Mac, which
+/// runs the macOS version below. This stub only lets the widget compile for iOS.
+private func fireRecordingRecordStart() async -> RecordingStartOutcome { .unavailable }
+#else
 private func fireRecordingRecordStart() async -> RecordingStartOutcome {
     let (exe, args) = recordingMeet42Invocation(
         verb: "record", extraArgs: ["start", "--manual", "--json"]
@@ -546,8 +590,19 @@ private func fireRecordingRecordStart() async -> RecordingStartOutcome {
     }
     return .unavailable
 }
+#endif
 
 // MARK: - Active meeting ownership
+
+/// A process this model started and may have to stop. `Process` exists only on macOS, and everything that starts one
+/// runs on the Mac (the active-meeting agent is a Mac background agent), so on iOS this is an inert stand-in.
+#if os(macOS)
+private typealias WatchedProcess = Process
+#else
+private final class WatchedProcess {
+    func terminate() {}
+}
+#endif
 
 @Observable
 @MainActor
@@ -559,7 +614,7 @@ private final class RecordingMeetingModel {
     var title = "Meeting"
     var sourceApp = "Meeting"
     var sourceBundleId: String?
-    var sourceIcon: NSImage?
+    var sourceIcon: PlatformImage?
     var recordingDir: String?
     var startedAt: Date?
     var scheduledStart: Date?
@@ -571,7 +626,7 @@ private final class RecordingMeetingModel {
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private let countdownTask = WidgetCountdownTask()
     @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
-    @ObservationIgnored private var watchProcess: Process?
+    @ObservationIgnored private var watchProcess: WatchedProcess?
     @ObservationIgnored private var watchedBundleId: String?
     @ObservationIgnored private var suppressCloseUntilOpen = false
     @ObservationIgnored private var completionAttempted = false
@@ -685,11 +740,16 @@ private final class RecordingMeetingModel {
         }
     }
 
-    private static func icon(bundleId: String?) -> NSImage? {
+    private static func icon(bundleId: String?) -> PlatformImage? {
+        #if os(macOS)
         guard let bundleId,
               let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
         else { return nil }
         return NSWorkspace.shared.icon(forFile: appURL.path)
+        #else
+        // An iPad has no copy of the Mac's meeting app to take the icon from.
+        return nil
+        #endif
     }
 
     private func startWatchIfNeeded() {
@@ -729,6 +789,10 @@ private final class RecordingMeetingModel {
         heartbeatTask = nil
     }
 
+    #if !os(macOS)
+    /// The call-detection watcher is a process on the Mac; this model only runs there.
+    private func runWatchOnce(bundleId: String) async {}
+    #else
     private func runWatchOnce(bundleId: String) async {
         let invocation = recordingMeet42Invocation(
             verb: "watch", extraArgs: ["--bundle-id", bundleId, "--json"]
@@ -748,6 +812,7 @@ private final class RecordingMeetingModel {
         }
         if watchProcess === process { watchProcess = nil }
     }
+    #endif
 
     private func handleWatchLine(_ line: String) async {
         guard let data = line.data(using: .utf8),
@@ -927,7 +992,12 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
 /// asked. The CLI call only refreshes the file.
 private enum MicCache {
     private static var directory: URL {
+        #if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/meet42")
+        #else
+        // Only the Mac's mic menu reads this cache; on iOS the path only has to be valid.
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".work42/meet42")
+        #endif
     }
 
     static func write(_ rows: [[String: Any]]) {
@@ -1300,6 +1370,11 @@ private struct RecordingTileView: View {
     @State private var speakersWatcher = WidgetFileWatcher()
     /// `speakers.json`, re-read only when the watcher sees it change (not on every transcript update).
     @State private var speakers: [String: ResolvedSpeaker] = [:]
+    #if !os(macOS)
+    /// The transcript as the Mac last answered it (`meet42 transcript`): this device cannot read the recording's files.
+    @State private var remoteLines: [RecordingLine] = []
+    @State private var remoteSpeakers: [String: ResolvedSpeaker] = [:]
+    #endif
     /// This session's `meeting/recording_dir` pointer — the recording now
     /// lives there, not in the session's own worktree (meet42-recording-
     /// lifecycle-rework s1: `meet42 record` owns its own store). nil until
@@ -1320,9 +1395,14 @@ private struct RecordingTileView: View {
     }
 
     var body: some View {
+        #if os(macOS)
         // `tail.lines` is observed, and `speakers` reloads when the watcher bumps its version, so the
         // body re-runs when either the transcript or the speaker names change.
         let lines = tail.lines
+        #else
+        let lines = remoteLines
+        let speakers = remoteSpeakers
+        #endif
 
         return Group {
             if lines.isEmpty {
@@ -1367,6 +1447,7 @@ private struct RecordingTileView: View {
                 }
             }
         }
+        #if os(macOS)
         .onChange(of: recordingDir) { _, newDir in
             guard let newDir else { return }
             tail.start(path: conversationPath(sessionDir: newDir))
@@ -1387,6 +1468,22 @@ private struct RecordingTileView: View {
             tail.stop()
             speakersWatcher.stop()
         }
+        #else
+        // Not the Mac: the Mac pushes the transcript while this tile shows, the way a chat reaches this device. It is the
+        // same transcript the Mac's own watcher reads, nothing is run per update, and it is held as long as the stream is open.
+        .task(id: recordingDir) {
+            guard recordingDir != nil else { return }
+            while !Task.isCancelled {
+                for await data in services.stream(RecordingTranscriptWire.stream, widget: RecordingTranscriptWire.widget) {
+                    guard let transcript = decodeRemoteTranscript(data) else { continue }
+                    remoteLines = transcript.lines
+                    remoteSpeakers = transcript.speakers
+                }
+                // The stream ended (the link was reset, or there is no Mac): ask again shortly.
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        #endif
     }
 
     /// The permission page that fixes `reason`, or nil when the failure is not a permission one.
@@ -1489,8 +1586,12 @@ private struct RecordingTileView: View {
 
     private func copyButton(_ text: String) -> some View {
         Button("Copy") {
+            #if os(macOS)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            #else
+            UIPasteboard.general.string = text
+            #endif
         }
     }
 
@@ -1756,6 +1857,15 @@ private struct RecordingAccessory: View {
     }
 }
 
+// MARK: - Hosting without the plugin loader
+
+/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
+/// The plugin loader builds the same class through `work42_widget_main`.
+public func meet42MakeWidget() -> any Work42Widget { RecordingWidget() }
+
+// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
+// C symbols, and a host that links several widgets has no use for them.
+#if !MEET42_WIDGETS_LIBRARY
 // MARK: - Widget entry-point ABI
 
 @_cdecl("work42_widget_sdk_version")
@@ -1769,3 +1879,4 @@ public func work42_widget_main() -> UnsafeMutableRawPointer {
     }
     return result
 }
+#endif

@@ -1,6 +1,6 @@
 # meet42 plugin
 
-Install: `work42 plugin install https://github.com/Work42-Ai/meet42 --path work42-plugin`, then ask the agent to set meet42 up (the `meet42-setup` skill installs the signed CLI and walks through permissions).
+Built in to Work42: the app installs this plugin and the signed meet42 CLI at launch and updates them with the app. Ask the agent to set meet42 up (the `meet42-setup` skill checks the CLI and walks through permissions).
 
 The meeting vertical, extracted from work42 into a first-party plugin
 (meet42-plugin-conversion, M2). The plugin is **UI + orchestration only** — all

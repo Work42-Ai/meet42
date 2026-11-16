@@ -66,6 +66,15 @@ enum PermissionsCommand {
         exit(entry.status == .granted ? 0 : 1)
     }
 
+    /// Speech Recognition's answer arrives on a background queue. The completion handler must not inherit this command's
+    /// main-actor isolation, or the runtime's queue assertion traps the process the moment the user answers the prompt
+    /// (it crashed `meet42 permissions ask` that way), so it is built in a nonisolated function.
+    private nonisolated static func requestSpeechAuthorization() async -> Bool {
+        await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+        }
+    }
+
     /// Shows the system prompt for `permission` and waits for the answer.
     private static func ask(_ permission: Meet42Permission) async -> Bool {
         switch permission {
@@ -74,9 +83,7 @@ enum PermissionsCommand {
         case .microphone:
             return await AVCaptureDevice.requestAccess(for: .audio)
         case .speech:
-            return await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
-            }
+            return await requestSpeechAuthorization()
         case .systemAudio:
             return await SystemAudioPermission.request() == .granted
         }

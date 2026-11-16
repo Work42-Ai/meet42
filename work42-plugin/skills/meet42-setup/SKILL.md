@@ -1,54 +1,25 @@
 ---
 name: meet42-setup
 description: |
-  Install and set up the meet42 command-line tool: download the signed release, install it as ~/.work42/meet42.app with the command linked into ~/.work42/bin, verify it,
-  grant its macOS permissions and load the calendar. Use it whenever `command -v meet42` prints nothing, a
-  meet42 command fails because the tool is missing or too old, or the user asks to set up or update meet42.
+  Set up the meet42 command-line tool that ships with Work42: check it is there, grant its macOS permissions and load the calendar.
+  Use it whenever a meet42 command fails because the tool is missing, a permission is not granted, or the user asks to set up
+  meet42.
 ---
 
-# meet42-setup — install and set up meet42
+# meet42-setup — set up meet42
 
-meet42 is a separate, signed and notarized command-line tool (github.com/Work42-Ai/meet42), not part of the
-Work42 app. This plugin's widgets and skills call it. **Always ask the user first.** Before installing or updating anything, tell them what you are about to do (download the signed
-meet42 app from github.com/Work42-Ai/meet42 into `~/.work42` and link it into `~/.work42/bin`) and wait for a yes. If they
-decline, stop and carry on without meet42; do not install it later on your own. Then follow these steps in order and stop at
-the first one that fails; say what failed instead of working around it.
+meet42 ships inside Work42: the app installs `~/.work42/meet42.app` (with the command linked at `~/.work42/bin/meet42`) at
+every launch and updates it with the app. It has its own macOS identity, so its permission prompts name meet42. This plugin's
+widgets and skills call it. **Never download or install it yourself.** Follow these steps in order and stop at the first one
+that fails; say what failed instead of working around it.
 
-## 1. Install or update the tool
+## 1. Check the tool
 
-1. Check what is there: `command -v meet42 && meet42 --version`. `~/.work42/bin` is on `PATH` in Work42 sessions.
-   If it prints a version, only continue with this step to update; otherwise install.
-2. Download, verify and install the latest release:
+Run `command -v meet42 && meet42 --version`. `~/.work42/bin` is on `PATH` in Work42 sessions.
 
-   ```bash
-   mkdir -p ~/.work42/bin && cd "$(mktemp -d)"
-   curl -fsSLO https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip
-   curl -fsSLO https://github.com/Work42-Ai/meet42/releases/latest/download/meet42.zip.sha256
-   shasum -a 256 -c meet42.zip.sha256
-   ```
-
-   `shasum` must print `meet42.zip: OK`. If it does not, stop and tell the user; do not install the file.
-3. Unpack it (it is a small app bundle, `meet42.app`) and check it is signed by Work42's Developer ID before
-   trusting it:
-
-   ```bash
-   ditto -x -k meet42.zip .
-   codesign --verify --deep --strict meet42.app
-   codesign -dv --verbose=2 meet42.app 2>&1 | grep -E "Identifier=com.work42.meet42|TeamIdentifier=74RFQFPVQ9"
-   ```
-
-   Both `Identifier` and `TeamIdentifier` lines must print and `--verify` must print nothing. If not, stop and
-   tell the user.
-4. If a recording is running (`meet42 record status`), do not replace the tool; ask the user to stop it first.
-   Otherwise put the app in place and link the command:
-
-   ```bash
-   rm -rf ~/.work42/meet42.app && mv meet42.app ~/.work42/meet42.app
-   ln -sf ~/.work42/meet42.app/Contents/MacOS/meet42 ~/.work42/bin/meet42
-   meet42 --version
-   ```
-
-   The app is what macOS knows as "meet42" in System Settings → Privacy & Security.
+If it prints nothing, or a command says the tool is too old, Work42 has not installed or updated it yet. Tell the user to
+quit and reopen Work42 (it installs meet42 at launch), or to update or reinstall Work42 if that does not help. Do not
+fetch meet42 from anywhere else.
 
 ## 2. Permissions
 
