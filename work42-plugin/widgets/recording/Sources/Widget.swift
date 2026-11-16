@@ -220,25 +220,22 @@ private func parseSpeakers(data: Data) -> [String: ResolvedSpeaker] {
 }
 
 /// What `meet42 transcript --dir <dir> --json` prints: a recording's two transcript files, verbatim.
-private struct RecordingTranscriptPayload: Decodable {
-    let conversation: String
+/// What the Mac pushes of a recording to a device that cannot read its files (the stream the host serves as `widget:recording`'s
+/// `transcript`): the newest whole lines of `conversation.jsonl`, exactly as the file holds them, and `speakers.json` as text.
+/// The lines then take the same path the Mac's own file read takes, `parseConversation` into the shared `ConversationView`.
+private struct RecordingTranscriptWire: Decodable {
+    static let widget = "widget:recording"
+    static let stream = "transcript"
+
+    let lines: [String]
     let speakers: String?
 }
 
-/// The transcript of the recording in `dir`, asked of the Mac with `meet42 transcript`. A device that is not the Mac cannot
-/// read the recording's files itself: they are in `~/.work42/meet42/recordings/`, outside the session folder. Nil when the
-/// Mac did not answer (the next poll tries again).
-private func fetchRemoteTranscript(
-    dir: String, services: SessionServices
-) async -> (lines: [RecordingLine], speakers: [String: ResolvedSpeaker])? {
-    guard let result = try? await services.shell.run(
-              command: "meet42 transcript --dir \(recordingShellQuote(dir)) --json"),
-          result.exitCode == 0,
-          let data = result.stdout.data(using: .utf8),
-          let payload = try? JSONDecoder().decode(RecordingTranscriptPayload.self, from: data)
-    else { return nil }
-    let speakers = payload.speakers.flatMap { $0.data(using: .utf8) }.map(parseSpeakers) ?? [:]
-    return (parseConversation(raw: payload.conversation), speakers)
+/// The transcript in one state the Mac pushed; nil when it is not one this widget reads.
+private func decodeRemoteTranscript(_ data: Data) -> (lines: [RecordingLine], speakers: [String: ResolvedSpeaker])? {
+    guard let wire = try? JSONDecoder().decode(RecordingTranscriptWire.self, from: data) else { return nil }
+    let speakers = wire.speakers.flatMap { $0.data(using: .utf8) }.map(parseSpeakers) ?? [:]
+    return (parseConversation(raw: wire.lines.joined(separator: "\n")), speakers)
 }
 
 // MARK: - WidgetFileWatcher (local FileWatcher reimplementation)
@@ -1472,14 +1469,17 @@ private struct RecordingTileView: View {
             speakersWatcher.stop()
         }
         #else
-        // Not the Mac: ask the Mac for the transcript every 2 s while this tile shows, as the Mac's own watcher does.
+        // Not the Mac: the Mac pushes the transcript while this tile shows, the way a chat reaches this device. It is the
+        // same transcript the Mac's own watcher reads, nothing is run per update, and it is held as long as the stream is open.
         .task(id: recordingDir) {
-            guard let dir = recordingDir else { return }
+            guard recordingDir != nil else { return }
             while !Task.isCancelled {
-                if let transcript = await fetchRemoteTranscript(dir: dir, services: services) {
+                for await data in services.stream(RecordingTranscriptWire.stream, widget: RecordingTranscriptWire.widget) {
+                    guard let transcript = decodeRemoteTranscript(data) else { continue }
                     remoteLines = transcript.lines
                     remoteSpeakers = transcript.speakers
                 }
+                // The stream ended (the link was reset, or there is no Mac): ask again shortly.
                 try? await Task.sleep(for: .seconds(2))
             }
         }
