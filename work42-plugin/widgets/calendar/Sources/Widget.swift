@@ -1880,11 +1880,10 @@ private struct CalendarPreferenceRow: View {
 // The record decision + 10s auto-start timer live on the agent (so side
 // effects stay agent-owned); the pill just calls back.
 
-/// Meeting-detection accent — the brand violet (#7C3AED), redefined locally so the
-/// widget links no Flow42Core/Work42App. Purple = "a meeting was detected".
-let meetingDetectionPurple = Color(red: 0x7C / 255, green: 0x3A / 255, blue: 0xED / 255)
-/// Lighter violet for the on-dark countdown copy (#C4B5FD).
-let meetingDetectionPurpleLight = Color(red: 0xC4 / 255, green: 0xB5 / 255, blue: 0xFD / 255)
+/// Meeting-detection accent — the theme accent, like every other notification card.
+var meetingDetectionAccent: Color { DT.systemAccent }
+/// The accent for the on-dark countdown copy.
+var meetingDetectionAccentLight: Color { DT.systemAccent }
 
 private func meetingAppIcon(bundleId: String) -> PlatformImage? {
     #if os(macOS)
@@ -2005,7 +2004,7 @@ struct DetectedPillView: View {
             subtitle: meeting.subtitle,
             icon: WidgetPillAppIcon(
                 image: meetingAppIcon(bundleId: meeting.bundleId),
-                tint: meetingDetectionPurple
+                tint: meetingDetectionAccent
             ),
             actionRow: { actionRow },
             progressRail: { countdownBar }
@@ -2032,7 +2031,7 @@ struct DetectedPillView: View {
             } else {
                 TimelineView(.animation) { ctx in
                     Text("Auto-starting in \(countdownSeconds(at: ctx.date))s")
-                        .foregroundStyle(meetingDetectionPurpleLight)
+                        .foregroundStyle(meetingDetectionAccentLight)
                 }
             }
         }
@@ -2057,7 +2056,7 @@ struct DetectedPillView: View {
                 Text(meeting.errorMessage == nil ? "Record now" : "Retry")
             }
         }
-        .buttonStyle(WidgetPillActionButtonStyle(emphasis: .primary, tint: meetingDetectionPurple))
+        .buttonStyle(WidgetPillActionButtonStyle(emphasis: .primary, tint: meetingDetectionAccent))
         .help("Start recording now")
     }
 
@@ -2071,9 +2070,9 @@ struct DetectedPillView: View {
                     ZStack(alignment: .leading) {
                         Rectangle().fill(Color.white.opacity(0.08))
                         Rectangle()
-                            .fill(meetingDetectionPurple)
+                            .fill(meetingDetectionAccent)
                             .frame(width: max(0, WidgetPillAccessoryMetrics.width * frac))
-                            .shadow(color: meetingDetectionPurple.opacity(0.7), radius: 4)
+                            .shadow(color: meetingDetectionAccent.opacity(0.7), radius: 4)
                     }
                     .frame(height: WidgetPillAccessoryMetrics.progressHeight)
                 }
@@ -2118,16 +2117,16 @@ struct SettingUpPillView: View {
             subtitle: meeting.subtitle,
             icon: WidgetPillAppIcon(
                 image: meetingAppIcon(bundleId: meeting.bundleId),
-                tint: meetingDetectionPurple
+                tint: meetingDetectionAccent
             ),
             actionRow: {
                 HStack(spacing: 9) {
                     ProgressView()
                         .controlSize(.small)
-                        .tint(meetingDetectionPurpleLight)
+                        .tint(meetingDetectionAccentLight)
                     Text(Self.mintHelpers[helperIndex % Self.mintHelpers.count])
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(meetingDetectionPurpleLight)
+                        .foregroundStyle(meetingDetectionAccentLight)
                         .lineLimit(1)
                         .contentTransition(.opacity)
                     Spacer(minLength: 8)
@@ -2137,7 +2136,7 @@ struct SettingUpPillView: View {
                 }
             },
             progressRail: {
-                Rectangle().fill(meetingDetectionPurple.opacity(0.75))
+                Rectangle().fill(meetingDetectionAccent.opacity(0.75))
             }
         )
         .onReceive(Timer.publish(every: helperInterval, on: .main, in: .common).autoconnect()) { _ in
@@ -2259,6 +2258,8 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
+    /// The "Meeting detected" notification on the pill, while one is showing (`notification_post` / `notification_dismiss`).
+    @ObservationIgnored private var detectedNotificationId: String?
     @ObservationIgnored private var detectorClaimTask: Task<Void, Never>?
     /// True once THIS instance owns the machine-wide detector lock (see
     /// `DetectorLock`) and is therefore the one spawning `meet42 watch` +
@@ -2474,7 +2475,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             onSkip: { [weak self] in self?.skip(callId: callId, s) }
         )
         CalendarDetectionState.shared.phase = .detected(meeting)
-        try? await s.pill.present(widgetId: "calendar", sessionId: s.sessionId)
+        await postDetected(subtitle: subtitle, s)
         Meet42Trace.log("detect", "prompt-shown", ["callId": callId, "app": app])
 
         countdownTask?.cancel()
@@ -2486,6 +2487,35 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         }
     }
 
+    /// What `notification_post` answers: the notification's id (null when the person switched the type off).
+    private struct PostedNotification: Decodable { let id: String? }
+
+    /// Shows the Detected prompt as a `meet42.meeting-detected` notification: the app queues it behind any other pill,
+    /// plays the sound and draws this widget's own pill. The id is kept to take it down.
+    private func postDetected(subtitle: String, _ s: WidgetBackgroundServices) async {
+        let result = try? await s.tools.call(
+            server: "work42-session", tool: "notification_post",
+            arguments: [
+                "type": .string("meet42.meeting-detected"), "title": .string("Meeting detected"),
+                "message": .string(subtitle), "widget": .string("calendar"),
+            ], session: s.sessionId)
+        guard let result, let data = try? JSONEncoder().encode(result),
+              let posted = try? JSONDecoder().decode(PostedNotification.self, from: data)
+        else { return }
+        detectedNotificationId = posted.id
+    }
+
+    /// Takes the Detected notification down for good. Without an id (the post failed) the pill is dismissed directly.
+    private func dismissDetected(_ s: WidgetBackgroundServices) async {
+        guard let id = detectedNotificationId else {
+            try? await s.pill.dismiss(widgetId: "calendar")
+            return
+        }
+        detectedNotificationId = nil
+        _ = try? await s.tools.call(
+            server: "work42-session", tool: "notification_dismiss", arguments: ["id": .string(id)], session: nil)
+    }
+
     /// A call-close cancels an undecided Detected prompt, if one is showing.
     /// Once Recording owns the active meeting pill, close events here are
     /// intentionally ignored.
@@ -2493,7 +2523,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         guard case .detected = CalendarDetectionState.shared.phase else { return }
         countdownTask?.cancel(); countdownTask = nil
         CalendarDetectionState.shared.phase = .none
-        try? await s.pill.dismiss(widgetId: "calendar")
+        await dismissDetected(s)
     }
 
     /// Shell `meet42 now --json`; nil when there is no current/imminent meeting.
@@ -2603,7 +2633,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 return
             }
             CalendarDetectionState.shared.phase = .none
-            try? await s.pill.dismiss(widgetId: "calendar")
+            await self.dismissDetected(s)
             Meet42Trace.log("detect", "pill-presented", ["callId": callId, "sessionId": sessionId])
         }
     }
@@ -2775,7 +2805,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
     private func clearAndDismiss(_ s: WidgetBackgroundServices) async {
         CalendarDetectionState.shared.phase = .none
-        try? await s.pill.dismiss(widgetId: "calendar")
+        await dismissDetected(s)
     }
 
     // MARK: (b) Reconciler — assisted events → work42 scheduler
