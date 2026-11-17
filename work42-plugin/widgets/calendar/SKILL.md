@@ -31,7 +31,10 @@ line), and lets you set the AI assist mode per calendar and per event.
   Colors: AI Assisted = violet, View only = blue, AI scheduled = orange.
 - **Detection pill:** the Calendar background agent is the sole pre-session
   mic-open owner. One machine-wide `meet42 watch` stream presents the detected
-  call app's native icon with Skip / Record now and a 10-second countdown.
+  call app's native icon with Skip / Record now and a 10-second countdown. It is
+  shown as the `meet42.meeting-detected` notification (declared in `plugin.yaml`
+  `notification_types`, posted with `notification_post` and taken down with
+  `notification_dismiss`), in the theme accent, so it queues behind any other pill.
   A nearby calendar event is attached only when its effective mode is
   `assisted`, it has a linked session id, and that session still resolves.
   View-only, AI-scheduled, unlinked, and stale-linked events are ignored
