@@ -28,15 +28,35 @@ public final class ModesStore {
     public struct File: Codable, Sendable, Equatable {
         public var calendars: [String: CalendarStore.CalendarMode]
         public var events: [String: CalendarStore.CalendarMode]
+        /// The session type a calendar's events start (a `session_types` id). A calendar with no entry uses `event`.
+        public var calendarTypes: [String: String]
+        /// The session type one event starts, overriding its calendar's. An event with no entry follows its calendar.
+        public var eventTypes: [String: String]
 
         public init(
             calendars: [String: CalendarStore.CalendarMode] = [:],
-            events: [String: CalendarStore.CalendarMode] = [:]
+            events: [String: CalendarStore.CalendarMode] = [:],
+            calendarTypes: [String: String] = [:],
+            eventTypes: [String: String] = [:]
         ) {
             self.calendars = calendars
             self.events = events
+            self.calendarTypes = calendarTypes
+            self.eventTypes = eventTypes
+        }
+
+        // A file written before session types existed has neither type map: decode them as empty.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            calendars = try container.decodeIfPresent([String: CalendarStore.CalendarMode].self, forKey: .calendars) ?? [:]
+            events = try container.decodeIfPresent([String: CalendarStore.CalendarMode].self, forKey: .events) ?? [:]
+            calendarTypes = try container.decodeIfPresent([String: String].self, forKey: .calendarTypes) ?? [:]
+            eventTypes = try container.decodeIfPresent([String: String].self, forKey: .eventTypes) ?? [:]
         }
     }
+
+    /// The session type an event starts when nothing says otherwise.
+    public static let defaultTypeId = "event"
 
     public let path: String
     private var file: File
@@ -90,7 +110,32 @@ public final class ModesStore {
         file.events[eventId] ?? file.calendars[calendarId] ?? .viewOnly
     }
 
+    /// The session type an event starts: its own override, else its calendar's default, else `event`.
+    public func effectiveType(forEvent eventId: String, calendarId: String) -> String {
+        file.eventTypes[eventId] ?? file.calendarTypes[calendarId] ?? Self.defaultTypeId
+    }
+
     // MARK: - Writes
+
+    /// Set (or, with nil, back to the default) the session type of a calendar's events. Persists atomically.
+    public func setType(calendar calendarId: String, typeId: String?) throws {
+        if let typeId {
+            file.calendarTypes[calendarId] = typeId
+        } else {
+            file.calendarTypes.removeValue(forKey: calendarId)
+        }
+        try persist()
+    }
+
+    /// Set (or, with nil, back to its calendar's) the session type of one event. Persists atomically.
+    public func setType(event eventId: String, typeId: String?) throws {
+        if let typeId {
+            file.eventTypes[eventId] = typeId
+        } else {
+            file.eventTypes.removeValue(forKey: eventId)
+        }
+        try persist()
+    }
 
     /// Set (or, with nil, clear) the per-calendar mode. Persists atomically.
     public func setCalendarMode(

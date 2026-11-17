@@ -91,10 +91,33 @@ struct CalEvent: Codable, Identifiable, Equatable {
 
 // MARK: - modes get --json payload
 
-/// Mirror of `meet42 modes get --json` → `{"calendars":{id:mode},"events":{id:mode}}`.
+/// Mirror of `meet42 modes get --json` →
+/// `{"calendars":{id:mode},"events":{id:mode},"calendarTypes":{id:typeId},"eventTypes":{id:typeId}}`.
+/// The two type maps are missing from an older CLI's answer and decode as empty.
 private struct ModesPayload: Codable {
     let calendars: [String: CalMode]
     let events: [String: CalMode]
+    let calendarTypes: [String: String]
+    let eventTypes: [String: String]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        calendars = try container.decode([String: CalMode].self, forKey: .calendars)
+        events = try container.decode([String: CalMode].self, forKey: .events)
+        calendarTypes = try container.decodeIfPresent([String: String].self, forKey: .calendarTypes) ?? [:]
+        eventTypes = try container.decodeIfPresent([String: String].self, forKey: .eventTypes) ?? [:]
+    }
+
+    /// The session type an event starts: its override, else its calendar's default, else `event`.
+    func effectiveType(eventId: String, calendarId: String) -> String {
+        eventTypes[eventId] ?? calendarTypes[calendarId] ?? "event"
+    }
+}
+
+/// A session type the pickers offer: `session_types` rows, by id and name.
+struct CalTypeChoice: Identifiable, Equatable, Decodable {
+    let id: String
+    let name: String
 }
 
 /// Shell-quote a single argument (single-quote wrap, escape embedded quotes).
@@ -202,6 +225,12 @@ final class CLICalendarStore {
     var calendarModes: [String: CalMode] = [:]
     /// Per-event overrides, keyed by `eventId`. Beats the calendar default.
     var eventModes: [String: CalMode] = [:]
+    /// The session type each calendar's events start, keyed by `calendarId`. No entry = `event`.
+    var calendarTypes: [String: String] = [:]
+    /// The session type one event starts, keyed by `eventId`. Beats its calendar's.
+    var eventTypes: [String: String] = [:]
+    /// The session types the pickers offer (`session_types`); empty until loaded.
+    var sessionTypes: [CalTypeChoice] = []
 
     enum ViewMode: String, CaseIterable, Identifiable, Sendable {
         case day, week, agenda
@@ -331,8 +360,9 @@ final class CLICalendarStore {
     /// Creates the event's session in the foreground through the app's global `session.open` intent, so Work42
     /// shows its "Setting up your Session" overlay and then opens the session selected. Throws when the intent fails.
     func createEventSession(eventId: String, title: String) async throws {
+        let typeId = events.first { $0.id == eventId }.map(effectiveType(for:)) ?? eventTypes[eventId] ?? "event"
         try await services.intents.execute(id: "session.open", params: [
-            "typeId": .string("event"),
+            "typeId": .string(typeId),
             "name": .string(title),
             "args": .object(["event_id": .string(eventId)]),
         ])
@@ -480,6 +510,47 @@ final class CLICalendarStore {
            let payload = try? JSONDecoder().decode(ModesPayload.self, from: data) {
             calendarModes = payload.calendars
             eventModes = payload.events
+            calendarTypes = payload.calendarTypes
+            eventTypes = payload.eventTypes
+        }
+        await loadSessionTypes()
+    }
+
+    // MARK: Session types
+
+    /// The session types a person may pick for events, from the `session_types` tool. Home's own type is not offered.
+    private func loadSessionTypes() async {
+        guard let result = try? await services.tools.call(
+                server: "work42-session", tool: "session_types", arguments: [:], session: nil),
+              let data = try? JSONEncoder().encode(result),
+              let rows = try? JSONDecoder().decode([CalTypeChoice].self, from: data)
+        else { return }
+        let offered = rows.filter { $0.id != "main" }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if offered != sessionTypes { sessionTypes = offered }
+    }
+
+    /// The session type an event starts: its override, else its calendar's default, else `event`.
+    func effectiveType(for event: CalEvent) -> String {
+        eventTypes[event.id] ?? calendarTypes[event.calendarId] ?? "event"
+    }
+
+    /// Set a calendar's session type; nil goes back to `event`.
+    func setCalendarType(_ id: String, _ typeId: String?) {
+        calendarTypes[id] = typeId  // optimistic
+        let cmd = "meet42 modes set-type calendar \(calShellQuote(id)) \(calShellQuote(typeId ?? "default"))"
+        Task {
+            _ = try? await services.shell.run(command: cmd)
+            await refresh()
+        }
+    }
+
+    /// Set one event's session type; nil follows its calendar.
+    func setEventType(_ id: String, _ typeId: String?) {
+        eventTypes[id] = typeId  // optimistic
+        let cmd = "meet42 modes set-type event \(calShellQuote(id)) \(calShellQuote(typeId ?? "default"))"
+        Task {
+            _ = try? await services.shell.run(command: cmd)
+            await refresh()
         }
     }
 
@@ -527,6 +598,7 @@ final class CLICalendarStore {
             .map { CalChoice(calendarId: $0.key, title: $0.value.title,
                              source: $0.value.source,
                              mode: calendarModes[$0.key] ?? .viewOnly,
+                             typeId: calendarTypes[$0.key],
                              eventCount: $0.value.count) }
             .sorted { $0.title < $1.title }
     }
@@ -548,6 +620,8 @@ struct CalChoice: Identifiable, Equatable {
     var title: String
     let source: CalEvent.Source
     var mode: CalMode
+    /// The session type this calendar's events start; nil = `event`.
+    var typeId: String?
     var eventCount: Int
     var id: String { calendarId }
 }
@@ -1230,7 +1304,26 @@ private struct CalSessionCancelKey: EnvironmentKey {
     static let defaultValue: @MainActor (String) async -> Void = { _ in }
 }
 
+/// What the event popup needs to offer a per-event session type: the choices, the event's own override, what it would
+/// otherwise follow, and the setter. Set by `CalendarRootView` from the store.
+struct CalTypePicker {
+    var choices: [CalTypeChoice] = []
+    /// The event's own override; nil follows its calendar.
+    var selection: @MainActor (_ eventId: String) -> String? = { _ in nil }
+    /// The name of the type the event follows when it has no override (its calendar's default, else Event).
+    var defaultName: @MainActor (_ calendarId: String) -> String = { _ in "Event" }
+    var set: @MainActor (_ eventId: String, _ typeId: String?) -> Void = { _, _ in }
+}
+
+private struct CalTypePickerKey: EnvironmentKey {
+    static let defaultValue = CalTypePicker()
+}
+
 extension EnvironmentValues {
+    fileprivate var calTypePicker: CalTypePicker {
+        get { self[CalTypePickerKey.self] }
+        set { self[CalTypePickerKey.self] = newValue }
+    }
     fileprivate var calEventLoader: @MainActor (String) async -> MeetEventState {
         get { self[CalEventLoaderKey.self] }
         set { self[CalEventLoaderKey.self] = newValue }
@@ -1257,6 +1350,7 @@ struct EventDetailPopover: View {
     @Environment(\.calEventLoader) private var loadEvent
     @Environment(\.calSessionCreate) private var createEventSession
     @Environment(\.calSessionCancel) private var cancelScheduled
+    @Environment(\.calTypePicker) private var typePicker
 
     @State private var event: MeetEvent?
     @State private var contentHeight: CGFloat = 0
@@ -1461,6 +1555,7 @@ struct EventDetailPopover: View {
             if let caption = aiCaption {
                 Text(caption).font(.system(size: DT.f11)).foregroundStyle(.secondary)
             }
+            if mode == .assisted, sessionId == nil { sessionTypeRow }
             if let createError {
                 Text(createError).font(.system(size: DT.f11)).foregroundStyle(DT.red)
             }
@@ -1469,6 +1564,18 @@ struct EventDetailPopover: View {
         .padding(.vertical, DT.s12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial)
+    }
+
+    /// The session type this event starts, overriding its calendar's. Only before the session exists: after that the type is fixed.
+    private var sessionTypeRow: some View {
+        HStack(spacing: DT.s8) {
+            Text("Session type").font(.system(size: DT.f11)).foregroundStyle(.secondary)
+            CalTypeMenu(
+                typeChoices: typePicker.choices, selection: typePicker.selection(item.id),
+                defaultLabel: typePicker.defaultName(item.calendarId),
+                onSelect: { typePicker.set(item.id, $0) })
+            Spacer(minLength: 0)
+        }
     }
 
     /// Under the buttons: when the automatic session will be created, for an AI-assisted event without one yet.
@@ -1593,7 +1700,9 @@ enum CalNotes {
 
 struct CalendarSettingsPopover: View {
     let choices: [CalChoice]
+    let typeChoices: [CalTypeChoice]
     let setMode: (String, CalMode) -> Void
+    let setType: (String, String?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: DT.s12) {
@@ -1615,7 +1724,7 @@ struct CalendarSettingsPopover: View {
             } else {
                 VStack(spacing: 6) {
                     ForEach(choices) { choice in
-                        CalendarPreferenceRow(choice: choice, setMode: setMode)
+                        CalendarPreferenceRow(choice: choice, typeChoices: typeChoices, setMode: setMode, setType: setType)
                     }
                 }
             }
@@ -1641,9 +1750,45 @@ struct CalendarSettingsPopover: View {
     }
 }
 
+/// "Session type" menu: Default (Event) or one of the session types. Shared by a calendar row and an event's popup.
+struct CalTypeMenu: View {
+    let typeChoices: [CalTypeChoice]
+    /// The explicitly chosen type id; nil is the default.
+    let selection: String?
+    /// What nil means here: "Event" for a calendar, "calendar default" for an event.
+    let defaultLabel: String
+    let onSelect: (String?) -> Void
+
+    private var selectedName: String {
+        guard let selection else { return defaultLabel }
+        return typeChoices.first { $0.id == selection }?.name ?? selection
+    }
+
+    var body: some View {
+        Menu {
+            Button { onSelect(nil) } label: {
+                if selection == nil { Label("Default (\(defaultLabel))", systemImage: "checkmark") } else { Text("Default (\(defaultLabel))") }
+            }
+            Divider()
+            ForEach(typeChoices) { type in
+                Button { onSelect(type.id) } label: {
+                    if selection == type.id { Label(type.name, systemImage: "checkmark") } else { Text(type.name) }
+                }
+            }
+        } label: {
+            Text(selectedName).font(.system(size: DT.f10, weight: .medium)).lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("The session type started for these events")
+    }
+}
+
 private struct CalendarPreferenceRow: View {
     let choice: CalChoice
+    let typeChoices: [CalTypeChoice]
     let setMode: (String, CalMode) -> Void
+    let setType: (String, String?) -> Void
 
     private var assisted: Binding<Bool> {
         Binding(
@@ -1665,6 +1810,9 @@ private struct CalendarPreferenceRow: View {
                     .foregroundStyle(DT.textTertiary)
             }
             Spacer(minLength: DT.s8)
+            CalTypeMenu(
+                typeChoices: typeChoices, selection: choice.typeId, defaultLabel: "Event",
+                onSelect: { setType(choice.calendarId, $0) })
             Toggle("", isOn: assisted)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
@@ -2018,6 +2166,13 @@ private struct DetectedEventPayload: Decodable {
 private struct SessionIdentityPayload: Decodable {
     let id: String
     let name: String
+}
+
+/// `session_show` → the workspace the session lives in.
+private struct SessionWorkspacePayload: Decodable {
+    let workspaceId: String
+
+    enum CodingKeys: String, CodingKey { case workspaceId = "workspace_id" }
 }
 
 private struct ResolvedAssistedMeeting {
@@ -2632,6 +2787,12 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         // Effective mode per event: event override → calendar default → view_only.
         guard let modes = await fetchModes(s) else { return }
         let events = await fetchEvents(s)
+        // The workspace to start the sessions in: the widget's own session's, read once per cycle. Without it nothing
+        // can be scheduled, so skip the cycle (the next one tries again).
+        guard let workspace = await ownWorkspace(s) else {
+            Meet42Trace.log("reconcile", "no-workspace", [:])
+            return
+        }
 
         var desired: Set<String> = []
         for e in events {
@@ -2644,11 +2805,12 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             let at = e.startsAt.addingTimeInterval(-15 * 60)
             let iso = ISO8601DateFormatter().string(from: at)
             // add is idempotent on --key — re-adding replaces the entry.
+            let typeId = modes.effectiveType(eventId: e.id, calendarId: e.calendarId)
             _ = try? await s.tools.call(
                 server: "work42-session", tool: "schedule_add",
                 arguments: [
-                    "type": .string("event"), "name": .string(e.title), "at": .string(iso),
-                    "args": .object(["event_id": .string(e.id)]), "key": .string(key),
+                    "type": .string(typeId), "workspace": .string(workspace), "name": .string(e.title),
+                    "at": .string(iso), "args": .object(["event_id": .string(e.id)]), "key": .string(key),
                 ], session: nil)
         }
 
@@ -2658,6 +2820,17 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 server: "work42-session", tool: "schedule_cancel", arguments: ["key": .string(key)], session: nil)
         }
         scheduledKeys = desired
+    }
+
+    /// The workspace of the widget's own session (`session_show` → `workspace_id`), or nil when it cannot be read.
+    private func ownWorkspace(_ s: WidgetBackgroundServices) async -> String? {
+        guard let shown = try? await s.tools.call(
+                server: "work42-session", tool: "session_show", arguments: [:], session: nil),
+              let data = try? JSONEncoder().encode(shown),
+              let payload = try? JSONDecoder().decode(SessionWorkspacePayload.self, from: data),
+              !payload.workspaceId.isEmpty
+        else { return nil }
+        return payload.workspaceId
     }
 
     private func fetchModes(_ s: WidgetBackgroundServices) async -> ModesPayload? {
@@ -2938,6 +3111,14 @@ private struct CalendarRootView: View {
                 .environment(\.calEventLoader, { id in await store.loadMeetEvent(id) })
                 .environment(\.calSessionCreate, { id, title in try await store.createEventSession(eventId: id, title: title) })
                 .environment(\.calSessionCancel, { id in await store.cancelScheduledSession(for: id) })
+                .environment(\.calTypePicker, CalTypePicker(
+                    choices: store.sessionTypes,
+                    selection: { store.eventTypes[$0] },
+                    defaultName: { calendarId in
+                        let typeId = store.calendarTypes[calendarId] ?? "event"
+                        return store.sessionTypes.first { $0.id == typeId }?.name ?? (typeId == "event" ? "Event" : typeId)
+                    },
+                    set: { id, typeId in store.setEventType(id, typeId) }))
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -3033,7 +3214,9 @@ private struct CalendarSettingsPopoverHost: View {
     var body: some View {
         CalendarSettingsPopover(
             choices: store.calendarChoices,
-            setMode: { id, mode in store.setCalendarMode(id, mode) }
+            typeChoices: store.sessionTypes,
+            setMode: { id, mode in store.setCalendarMode(id, mode) },
+            setType: { id, typeId in store.setCalendarType(id, typeId) }
         )
     }
 }
