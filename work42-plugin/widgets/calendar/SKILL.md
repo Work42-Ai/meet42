@@ -16,13 +16,25 @@ line), and lets you set the AI assist mode per calendar and per event.
   `meet42 modes set calendar|event <id> <view_only|assisted|ai_scheduled>`. It
   refreshes on a ~2s timer while mounted. The widget imports no calendar type —
   it decodes local `CalEvent` / `CalMode` mirrors.
+- **Event session types:** the session an assisted event gets is not always an
+  `event`. Each calendar has a session type (default `event`) and one event can
+  override it: `meet42 modes set-type <calendar|event> <id> <typeId|default>`
+  (`default` clears it). `meet42 modes get --json` carries `calendarTypes` and
+  `eventTypes`; the widget's type picker lists the `session_types` tool's rows.
+  The event's type is its override, else its calendar's, else `event`. The
+  reconciler passes that type, and the workspace of the widget's own session
+  (`session_show` → `workspace_id`), to `schedule_add` for the T-15 entry; if the
+  workspace cannot be read it skips that cycle and tries again on the next.
 - **Assist modes:** clicking an event opens a popover with its details; a
   view-only event offers "Enable AI assistance" (a per-event override). The gear
   button opens a settings popover with a per-calendar AI-assistance toggle.
   Colors: AI Assisted = violet, View only = blue, AI scheduled = orange.
 - **Detection pill:** the Calendar background agent is the sole pre-session
   mic-open owner. One machine-wide `meet42 watch` stream presents the detected
-  call app's native icon with Skip / Record now and a 10-second countdown.
+  call app's native icon with Skip / Record now and a 10-second countdown. It is
+  shown as the `meet42.meeting-detected` notification (declared in `plugin.yaml`
+  `notification_types`, posted with `notification_post` and taken down with
+  `notification_dismiss`), in the theme accent, so it queues behind any other pill.
   A nearby calendar event is attached only when its effective mode is
   `assisted`, it has a linked session id, and that session still resolves.
   View-only, AI-scheduled, unlinked, and stale-linked events are ignored

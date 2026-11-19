@@ -90,9 +90,13 @@ enum Dispatcher {
                 line-delimited JSON on call-app input transitions. --bundle-id
                 restricts observation to one detected meeting app.
           modes get [--json]
-                Per-calendar / per-event assistance flags.
+                Per-calendar / per-event assistance flags, plus calendarTypes
+                and eventTypes (the session type each starts; none = event).
           modes set <calendar|event> <id> <view_only|assisted|ai_scheduled>
                 Set an assistance flag.
+          modes set-type <calendar|event> <id> <typeId|default> [--json]
+                Set the session type a calendar's events start, or one event's
+                override of it. "default" clears it (event, or its calendar's).
 
         Permissions:
           permissions [--json]

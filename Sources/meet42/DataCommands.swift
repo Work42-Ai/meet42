@@ -167,15 +167,55 @@ enum DataCommands {
 
     static func modes(args: [String]) {
         guard let sub = CLI.firstPositional(args) else {
-            CLI.fail("meet42 modes: expected 'get' or 'set'.")
+            CLI.fail("meet42 modes: expected 'get', 'set' or 'set-type'.")
         }
         switch sub {
         case "get":
             modesGet(args: args)
         case "set":
             modesSet(args: args)
+        case "set-type":
+            modesSetType(args: args)
         default:
-            CLI.fail("meet42 modes: unknown subcommand '\(sub)'. Use 'get' or 'set'.")
+            CLI.fail("meet42 modes: unknown subcommand '\(sub)'. Use 'get', 'set' or 'set-type'.")
+        }
+    }
+
+    /// A `session_types` id: lower case letters, digits and hyphens, starting with a letter or digit.
+    static func isValidTypeId(_ id: String) -> Bool {
+        id.range(of: "^[a-z0-9][a-z0-9-]*$", options: .regularExpression) != nil
+    }
+
+    private static func modesSetType(args: [String]) {
+        // positionals: ["set-type", <calendar|event>, <id>, <typeId|default>]
+        let pos = CLI.positionals(args)
+        guard pos.count >= 4 else {
+            CLI.fail("meet42 modes set-type: usage: modes set-type <calendar|event> <id> <typeId|default>")
+        }
+        let scope = pos[1]
+        let id = pos[2]
+        let typeRaw = pos[3]
+        let typeId: String? = typeRaw == "default" ? nil : typeRaw
+        if let typeId, !isValidTypeId(typeId) {
+            CLI.fail("meet42 modes set-type: '\(typeId)' is not a session type id (lower case letters, digits and hyphens). Use 'default' to clear.")
+        }
+        let store = ModesStore()
+        do {
+            switch scope {
+            case "calendar":
+                try store.setType(calendar: id, typeId: typeId)
+            case "event":
+                try store.setType(event: id, typeId: typeId)
+            default:
+                CLI.fail("meet42 modes set-type: scope must be 'calendar' or 'event'.")
+            }
+        } catch {
+            CLI.fail("meet42 modes set-type: failed to persist: \(error)", code: 2)
+        }
+        if CLI.wantsJSON(args) {
+            CLI.emitJSON(store.all())
+        } else {
+            print("Set \(scope) \(id) session type → \(typeId ?? "default (\(ModesStore.defaultTypeId))")")
         }
     }
 
@@ -200,6 +240,22 @@ enum DataCommands {
         } else {
             for (id, mode) in all.events.sorted(by: { $0.key < $1.key }) {
                 print("  \(CLI.padded(id, 40)) \(mode.rawValue)")
+            }
+        }
+        print("Session types (calendar default; no entry = \(ModesStore.defaultTypeId)):")
+        if all.calendarTypes.isEmpty {
+            print("  (none)")
+        } else {
+            for (id, type) in all.calendarTypes.sorted(by: { $0.key < $1.key }) {
+                print("  \(CLI.padded(id, 40)) \(type)")
+            }
+        }
+        print("Event session type overrides:")
+        if all.eventTypes.isEmpty {
+            print("  (none)")
+        } else {
+            for (id, type) in all.eventTypes.sorted(by: { $0.key < $1.key }) {
+                print("  \(CLI.padded(id, 40)) \(type)")
             }
         }
     }
