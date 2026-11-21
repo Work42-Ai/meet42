@@ -54,7 +54,7 @@ private nonisolated func shellQuote(_ value: String) -> String {
 // widget's work42_widget_main/work42_widget_sdk_version pair).
 
 @_cdecl("work42_plugin_sdk_version")
-public func work42_plugin_sdk_version() -> Int32 { WidgetSDK.abiVersion }
+public func work42_plugin_sdk_version() -> Int32 { Work42SDKCompatibility.versionProbeValue }
 
 @_cdecl("work42_plugin_main")
 public func work42_plugin_main() -> UnsafeMutableRawPointer {

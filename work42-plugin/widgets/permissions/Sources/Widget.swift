@@ -406,7 +406,7 @@ public func meet42MakeWidget() -> any Work42Widget { PermissionsWidget() }
 // C symbols, and a host that links several widgets has no use for them.
 #if !MEET42_WIDGETS_LIBRARY
 @_cdecl("work42_widget_sdk_version")
-public func work42_widget_sdk_version() -> Int32 { WidgetSDK.abiVersion }
+public func work42_widget_sdk_version() -> Int32 { Work42SDKCompatibility.versionProbeValue }
 
 @_cdecl("work42_widget_main")
 public func work42_widget_main() -> UnsafeMutableRawPointer {
