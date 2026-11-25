@@ -95,6 +95,19 @@ private actor TranscriptTailReader {
         return TailUpdate(lines: lines, replacesAll: replacesAll)
     }
 
+    /// The words still being recognized (`partial.json` beside the conversation), or none. Small, so read whole on every poll.
+    func partials() -> [RecordingLine] {
+        let file = (path as NSString).deletingLastPathComponent + "/" + ConversationWriter.partialFileName
+        guard let data = FileManager.default.contents(atPath: file),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return [] }
+        return rows
+            .compactMap { row in
+                (try? JSONSerialization.data(withJSONObject: row)).flatMap { String(data: $0, encoding: .utf8) }
+                    .flatMap { RecordingLine(jsonString: $0) }
+            }
+            .sorted { $0.ts < $1.ts }
+    }
+
     private static func parse(_ bytes: Data, offset: Int) -> RecordingLine? {
         guard !bytes.isEmpty, let text = String(data: bytes, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
@@ -107,11 +120,16 @@ private actor TranscriptTailReader {
 @MainActor
 final class TranscriptTail {
 
-    /// Lines are whole sentences, so a slower refresh reads the same; each publish re-lays out the
-    /// visible transcript, so batching a couple of seconds of lines into one keeps scrolling smooth.
-    static let interval: Duration = .seconds(2)
+    /// New words show within half a second of being said (the old engine's tile was as quick). Only a changed poll publishes,
+    /// so an idle recording costs a stat and a small read per tick.
+    static let interval: Duration = .milliseconds(500)
 
     private(set) var lines: [RecordingLine] = []
+    /// The words still being recognized, shown after `lines` and replaced by the finished line.
+    private(set) var partials: [RecordingLine] = []
+
+    /// What the tile draws: the conversation, then the words being said.
+    var displayed: [RecordingLine] { partials.isEmpty ? lines : lines + partials }
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var path: String?
@@ -122,10 +140,15 @@ final class TranscriptTail {
         stop()
         self.path = path
         lines = []
+        partials = []
         let reader = TranscriptTailReader(path: path)
         task = Task { [weak self] in
             while !Task.isCancelled {
                 if let update = await reader.poll() { self?.apply(update) }
+                let partials = await reader.partials()
+                if let self, self.partials.map(\.id) != partials.map(\.id) || self.partials.map(\.textValue) != partials.map(\.textValue) {
+                    self.partials = partials
+                }
                 try? await Task.sleep(for: Self.interval)
             }
         }
@@ -135,6 +158,7 @@ final class TranscriptTail {
         task?.cancel()
         task = nil
         path = nil
+        partials = []
     }
 
     private func apply(_ update: TailUpdate) {

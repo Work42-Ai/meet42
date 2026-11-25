@@ -99,6 +99,12 @@ nonisolated enum RecordingLine: Identifiable, Sendable {
         }
     }
 
+    /// What the line says (a speaker's words; a system event has none), to tell a partial line that grew from one that did not.
+    var textValue: String {
+        if case .speaker(let l) = self { return l.text }
+        return ""
+    }
+
     /// The line's ISO 8601 timestamp, whichever kind it is.
     var ts: String {
         switch self {
@@ -1160,7 +1166,7 @@ private struct RecordingTileView: View {
         #if os(macOS)
         // `tail.lines` is observed, and `speakers` reloads when the watcher bumps its version, so the
         // body re-runs when either the transcript or the speaker names change.
-        let lines = tail.lines
+        let lines = tail.displayed
         #else
         let lines = remoteLines
         let speakers = remoteSpeakers

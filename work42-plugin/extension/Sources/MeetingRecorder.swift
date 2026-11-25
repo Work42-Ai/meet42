@@ -175,8 +175,9 @@ final class MeetingRecorder {
             // Transcription failing (the speech permission, the on-device model) does not end the recording: the audio is
             // still being kept, as it was when the daemon's transcription failed to start.
             do {
-                for try await segment in services.speech.liveTranscript(of: recording.id) {
-                    writer.append(segment)
+                // Partial lines go beside the conversation (the tile shows them as they grow); only a final line is kept in it.
+                for try await segment in services.speech.liveTranscript(of: recording.id, partialResults: true) {
+                    if segment.isFinal { writer.append(segment) } else { writer.setPartial(segment) }
                 }
             } catch {
                 Meet42Trace.log("record", "transcription-failed", ["error": String(describing: error)])
@@ -203,6 +204,7 @@ final class MeetingRecorder {
         state.levels?.cancel()
         // The last words are still being recognized when capture ends: give them a moment, then let go.
         await Self.finish(state.transcript, within: transcriptGrace)
+        state.writer.clearAllPartials()
         Meet42Trace.log("record", "stop-finalized", ["recordingId": active.recordingId])
         return true
     }
@@ -289,7 +291,54 @@ final class ConversationWriter: @unchecked Sendable {
         return json + "\n"
     }
 
+    /// The words still being recognized, one per source, in `partial.json` beside the conversation (an array of lines in the
+    /// conversation's shape, with a fixed `lineId` per source so the tile replaces it in place). Never part of the
+    /// conversation: `meet42 transcript` and the summary read only finished lines.
+    nonisolated static let partialFileName = "partial.json"
+    private var partials: [String: [String: Any]] = [:]
+    private var partialFile: URL { file.deletingLastPathComponent().appendingPathComponent(Self.partialFileName) }
+
+    func setPartial(_ segment: TranscriptSegment, at date: Date = Date()) {
+        guard let line = line(for: segment, at: date, id: UUID()),
+              let data = line.data(using: .utf8),
+              var row = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        let key = segment.source == .systemAudio ? "Them" : "You"
+        row["lineId"] = "partial-\(key)"
+        lock.withLock {
+            partials[key] = row
+            writePartials()
+        }
+    }
+
+    /// A finished line replaces the partial of its source.
+    func clearPartial(for source: AudioSource?) {
+        let key = source == .systemAudio ? "Them" : "You"
+        lock.withLock {
+            guard partials.removeValue(forKey: key) != nil else { return }
+            writePartials()
+        }
+    }
+
+    func clearAllPartials() {
+        lock.withLock {
+            partials = [:]
+            try? FileManager.default.removeItem(at: partialFile)
+        }
+    }
+
+    /// Callers hold `lock`.
+    private func writePartials() {
+        if partials.isEmpty {
+            try? FileManager.default.removeItem(at: partialFile)
+            return
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: Array(partials.values), options: [.sortedKeys]) else { return }
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: partialFile, options: .atomic)
+    }
+
     func append(_ segment: TranscriptSegment) {
+        clearPartial(for: segment.source)
         guard let line = line(for: segment) else { return }
         lock.withLock {
             try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
