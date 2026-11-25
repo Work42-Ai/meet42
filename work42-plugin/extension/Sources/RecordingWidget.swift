@@ -508,7 +508,8 @@ private final class RecordingMeetingModel {
         if MeetingRecorder.shared.isRecording(dir: recordingDir) {
             if phase == .inactive || phase == .stopped {
                 phase = .active
-                try? await services.pill.present(widgetId: "recording", sessionId: sessionId)
+                do { try await services.pill.present(widgetId: "recording", sessionId: sessionId) }
+                catch { Meet42Trace.pillFailed("present", sessionId: sessionId, error) }
             }
             startWatchIfNeeded()
             startHeartbeatIfNeeded()
@@ -517,7 +518,7 @@ private final class RecordingMeetingModel {
             cancelPrompt()
             stopWatch()
             stopHeartbeat()
-            try? await services.pill.dismiss(widgetId: "recording")
+            do { try await services.pill.dismiss(widgetId: "recording") } catch { Meet42Trace.pillFailed("dismiss", sessionId: nil, error) }
         }
     }
 
@@ -643,7 +644,7 @@ private final class RecordingMeetingModel {
         }
         phase = .stopped
         stopWatch()
-        try? await services.pill.dismiss(widgetId: "recording")
+        do { try await services.pill.dismiss(widgetId: "recording") } catch { Meet42Trace.pillFailed("dismiss", sessionId: nil, error) }
         Meet42Trace.log("recording", "recording-stopped", ["sessionId": sessionId, "reason": reason])
     }
 
@@ -926,10 +927,12 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
             _ = await setMeetingValue("recording_dir", dir, tools: svc.tools)
             _ = await setMeetingValue("started_at", isoNow(), tools: svc.tools)
             await refreshRecordingState()
-            try? await svc.pill.present(widgetId: "recording", sessionId: sessionId)
+            do { try await svc.pill.present(widgetId: "recording", sessionId: sessionId) }
+            catch { Meet42Trace.pillFailed("present", sessionId: sessionId, error) }
         case .refused:
+            // A press while a recording runs (this session's, which the tile already shows, or another's) does nothing visible:
+            // an error banner under a running recording would only say the button was pressed twice.
             Meet42Trace.log("recording", "manual-record-aborted", ["sessionId": sessionId, "reason": "already-recording"])
-            await storeStartFailure(svc, reason: "already_recording", message: "Another recording is already running.")
         case .failed(let reason, let message):
             Meet42Trace.log("recording", "manual-record-aborted", ["sessionId": sessionId, "reason": reason])
             // Say why, in the tile: a permission that was turned off, a mic that went missing.
@@ -946,7 +949,7 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
         guard let recordingDir = await fetchRecordingDir(services: svc) else { return }
         await MeetingRecorder.shared.stop(dir: recordingDir)
         _ = await setMeetingValue("ended_at", isoNow(), tools: svc.tools)
-        try? await svc.pill.dismiss(widgetId: "recording")
+        do { try await svc.pill.dismiss(widgetId: "recording") } catch { Meet42Trace.pillFailed("dismiss", sessionId: sessionId, error) }
         Meet42Trace.log("recording", "manual-stop", ["sessionId": sessionId])
         await refreshRecordingState()
     }
@@ -964,7 +967,8 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
             // reconciliation is only a fast path for a newly-mounted view.
             if self.isRecordingThisSession,
                let sessionId = services.sessionId {
-                try? await services.pill.present(widgetId: "recording", sessionId: sessionId)
+                do { try await services.pill.present(widgetId: "recording", sessionId: sessionId) }
+                catch { Meet42Trace.pillFailed("present", sessionId: sessionId, error) }
             }
             while !Task.isCancelled {
                 await self.refreshRecordingState()

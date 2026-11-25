@@ -45,6 +45,12 @@ nonisolated enum Meet42Trace {
         }
     }
 
+    /// A pill call the host refused. Not every host can draw an extension's pill (it throws "has no pill version"), and the
+    /// recording must not depend on it: the callers carry on without the pill and this says so in the trace.
+    static func pillFailed(_ action: String, sessionId: String?, _ error: any Error) {
+        log("pill", "\(action)-failed", ["sessionId": sessionId ?? "", "error": String(describing: error)])
+    }
+
     static func log(_ src: String, _ evt: String, _ fields: [String: Any] = [:]) {
         guard traceEnabled else { return }
         var row = fields

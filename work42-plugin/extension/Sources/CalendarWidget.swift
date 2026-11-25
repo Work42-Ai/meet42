@@ -2539,18 +2539,17 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             }
             Meet42Trace.log("detect", "session-resolved", ["callId": callId, "sessionId": sessionId])
 
+            // Present swaps the currently mounted Calendar pill for the session-owned Recording pill without selecting that
+            // session. The recording and its session exist by now and must not depend on the pill: a host that cannot draw an
+            // extension's pill refuses the call, and the meeting is recorded all the same (the trace says why there is no pill).
             do {
-                // Present swaps the currently mounted Calendar pill for the
-                // session-owned Recording pill without selecting that session.
                 try await s.pill.present(widgetId: "recording", sessionId: sessionId)
+                Meet42Trace.log("detect", "pill-presented", ["callId": callId, "sessionId": sessionId])
             } catch {
-                await MeetingRecorder.shared.stop(dir: recording.dir)
-                self.showFailure(meeting, message: "Couldn't open the meeting pill")
-                return
+                Meet42Trace.pillFailed("present", sessionId: sessionId, error)
             }
             CalendarDetectionState.shared.phase = .none
             await self.dismissDetected(s)
-            Meet42Trace.log("detect", "pill-presented", ["callId": callId, "sessionId": sessionId])
         }
     }
 
