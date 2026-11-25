@@ -4,7 +4,7 @@
 import Foundation
 import Testing
 import Work42PluginKit
-@testable import Meet42CalendarWidget
+@testable import Meet42PluginWidgets
 
 /// One storage for every instance, as the Mac's database is for the Mac's calendar and an iPad's (through the link).
 private nonisolated final class SharedStorage: WidgetStorageService, @unchecked Sendable {

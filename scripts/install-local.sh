@@ -5,12 +5,11 @@
 #
 #   scripts/install-local.sh
 #
-# Signing: the same Developer ID as the installed app keeps macOS's Microphone, Calendar, Speech and Screen
-# Recording grants (they are keyed to the signing identity). The identity comes from
-# WORK42_DEVELOPER_ID_APPLICATION (env or .env.release.local), else the single "Developer ID Application"
-# identity in the login Keychain. Ad-hoc signing is refused: it would make macOS forget every grant.
+# Signing: the identity comes from WORK42_DEVELOPER_ID_APPLICATION (env or .env.release.local), else the single
+# "Developer ID Application" identity in the login Keychain. Ad-hoc signing is refused so the installed app keeps
+# one identity across builds.
 #
-# The swap is atomic and safe while meet42 is running (a recording keeps the copy it loaded): the new app is
+# The swap is atomic and safe while meet42 is running (the process keeps the copy it loaded): the new app is
 # copied beside the old one, then renamed into place. The previous build stays at ~/.work42/meet42.app.prev.
 set -euo pipefail
 

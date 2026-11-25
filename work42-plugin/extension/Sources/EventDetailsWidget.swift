@@ -449,25 +449,3 @@ private struct EventCard: View {
         return Color(red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255, blue: Double(value & 0xFF) / 255)
     }
 }
-
-// MARK: - Hosting without the plugin loader
-
-/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
-/// The plugin loader builds the same class through `work42_widget_main`.
-public func meet42MakeWidget() -> any Work42Widget { EventDetailsWidget() }
-
-// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
-// C symbols, and a host that links several widgets has no use for them.
-#if !MEET42_WIDGETS_LIBRARY
-@_cdecl("work42_widget_sdk_version")
-public func work42_widget_sdk_version() -> Int32 { Work42SDKCompatibility.versionProbeValue }
-
-@_cdecl("work42_widget_main")
-public func work42_widget_main() -> UnsafeMutableRawPointer {
-    nonisolated(unsafe) var result: UnsafeMutableRawPointer!
-    MainActor.assumeIsolated {
-        result = WidgetEntryPoint.register(EventDetailsWidget())
-    }
-    return result
-}
-#endif

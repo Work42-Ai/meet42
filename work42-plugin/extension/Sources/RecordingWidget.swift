@@ -238,7 +238,7 @@ private func decodeRemoteTranscript(_ data: Data) -> (lines: [RecordingLine], sp
     return (parseConversation(raw: wire.lines.joined(separator: "\n")), speakers)
 }
 
-// MARK: - WidgetFileWatcher (local FileWatcher reimplementation)
+// MARK: - RecordingFileWatcher (local FileWatcher reimplementation)
 
 /// Minimal self-contained replacement for `Work42App.FileWatcher` — polls the
 /// file's (mtime, size) signature every ~0.5s and bumps `version` on change,
@@ -246,7 +246,7 @@ private func decodeRemoteTranscript(_ data: Data) -> (lines: [RecordingLine], sp
 /// `speakers.json` are appended/rewritten out-of-band by the capture daemon.
 @Observable
 @MainActor
-private final class WidgetFileWatcher {
+private final class RecordingFileWatcher {
 
     private(set) var version = 0
 
@@ -303,90 +303,6 @@ private func recordingShellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-/// Line-buffered stdout reader driven by `FileHandle.readabilityHandler`
-/// (callback on read-readiness) rather than `FileHandle.bytes.lines`, whose
-/// `for await` performs a synchronous blocking `read()` on whichever thread
-/// picks up the continuation — pinning one of Swift Concurrency's limited,
-/// process-wide cooperative threads for as long as the pipe stays open
-/// (here, the lifetime of a `meet42 watch` process, which by design never
-/// exits on its own). Mirrors the calendar widget's `calAsyncLines`.
-private func recordingAsyncLines(from fileHandle: FileHandle) -> AsyncStream<String> {
-    // GCD serializes a single FileHandle's readabilityHandler invocations
-    // (one event-source callback at a time), so this buffer is never
-    // touched concurrently despite the compiler being unable to prove it.
-    nonisolated final class LineBuffer: @unchecked Sendable {
-        private var data = Data()
-        nonisolated func extractLines(appending chunk: Data) -> [String] {
-            data.append(chunk)
-            var lines: [String] = []
-            while let newline = data.firstIndex(of: 0x0A) {
-                if let line = String(data: data[..<newline], encoding: .utf8) {
-                    lines.append(line)
-                }
-                data.removeSubrange(...newline)
-            }
-            return lines
-        }
-        nonisolated func drainRemainder() -> String? {
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return nil }
-            return line
-        }
-    }
-
-    return AsyncStream { continuation in
-        let buffer = LineBuffer()
-        fileHandle.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else {
-                handle.readabilityHandler = nil
-                if let line = buffer.drainRemainder() { continuation.yield(line) }
-                continuation.finish()
-                return
-            }
-            for line in buffer.extractLines(appending: chunk) {
-                continuation.yield(line)
-            }
-        }
-        continuation.onTermination = { _ in
-            fileHandle.readabilityHandler = nil
-        }
-    }
-}
-
-// MARK: - Meet42Trace (duplicated per widget — no shared target; same convention as shell-quote helpers)
-
-/// Append one JSON-line trace event to ~/.work42/meet42/trace.jsonl.
-/// Best-effort (never throws, never blocks). Disabled when MEET42_TRACE=0.
-private enum Meet42Trace {
-    static func log(_ src: String, _ evt: String, _ fields: [String: Any] = [:]) {
-        guard ProcessInfo.processInfo.environment["MEET42_TRACE"] != "0" else { return }
-        var row = fields
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        row["ts"]  = f.string(from: Date())
-        row["pid"] = Int(getpid())
-        row["src"] = src
-        row["evt"] = evt
-        guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
-              var line = String(data: data, encoding: .utf8) else { return }
-        line += "\n"
-        let root = (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42")
-        let path = (root as NSString).appendingPathComponent("trace.jsonl")
-        // Rotate past 5 MB.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-           let size = attrs[.size] as? Int, size > 5 * 1024 * 1024 {
-            rename(path, path + ".1")
-        }
-        // Ensure the directory exists before opening.
-        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: nil)
-        // O_APPEND|O_CREAT|O_WRONLY: atomic across processes for small writes.
-        let fd = open(path, O_APPEND | O_CREAT | O_WRONLY, 0o644)
-        guard fd >= 0 else { return }
-        line.withCString { _ = write(fd, $0, strlen($0)) }
-        close(fd)
-    }
-}
-
 /// Shared formatters: allocating two `ISO8601DateFormatter`s per call was a per-row cost on every
 /// body pass. `ISO8601DateFormatter` is thread-safe for formatting once configured.
 private enum ISO8601Parsing {
@@ -407,15 +323,7 @@ nonisolated private func parseISO8601(_ ts: String) -> Date? {
     ISO8601Parsing.fractional.date(from: ts) ?? ISO8601Parsing.whole.date(from: ts)
 }
 
-// MARK: - Recording truth (meet42 record status + the workflow-gate storage)
-
-/// Decode target for `meet42 record status --json`. `meet42 record` is now
-/// session-agnostic (meet42-recording-lifecycle-rework s1) — its status is
-/// keyed by `dir` (the recording's own directory), not a session id.
-private struct RecordingRecordStatusPayload: Decodable {
-    let recording: Bool
-    let dir: String?
-}
+// MARK: - Recording truth (MeetingRecorder + the workflow-gate storage)
 
 private struct RecordingSessionIdentityPayload: Decodable {
     let id: String
@@ -454,13 +362,10 @@ private func fetchRecordingDir(services: SessionServices) async -> String? {
     return dir
 }
 
-/// Recording truth for one session: `meet42 record status` is the single
-/// source of truth for "is MY session's recording the one currently active"
-/// (AC7) — compared by DIRECTORY, since `meet42 record` is session-agnostic
-/// (meet42-recording-lifecycle-rework s1) and no longer knows about session
-/// ids or worktree slugs at all. `recordingDir` and `startedAt` are
-/// read via `services.storage` (see `fetchRecordingDir`'s doc for why that's
-/// the correct API, not the shelled CLI, for a non-task session).
+/// Recording truth for one session: `MeetingRecorder` is the single source of truth for "is MY session's recording the one
+/// currently active" (AC7) — compared by DIRECTORY, since a recording is session-agnostic and knows nothing of session ids
+/// or worktree slugs. `recordingDir` and `startedAt` are read via `services.storage` (see `fetchRecordingDir`'s doc for
+/// why that's the right API for a non-task session).
 private struct RecordingSnapshot {
     /// This session's `meeting/recording_dir` pointer, or nil if no
     /// recording has ever been attached to it.
@@ -474,14 +379,7 @@ private func fetchRecordingSnapshot(services: SessionServices) async -> Recordin
         return RecordingSnapshot(recordingDir: nil, isRecordingThisSession: false, startedAt: nil)
     }
     let recordingDir = await fetchRecordingDir(services: services)
-    var isRecording = false
-    if let recordingDir,
-       let r = try? await services.shell.run(command: "meet42 record status --json"),
-       r.exitCode == 0, let data = r.stdout.data(using: .utf8),
-       let status = try? JSONDecoder().decode(RecordingRecordStatusPayload.self, from: data),
-       status.recording, status.dir == recordingDir {
-        isRecording = true
-    }
+    let isRecording = recordingDir.map { MeetingRecorder.shared.isRecording(dir: $0) } ?? false
     var startedAt: Date?
     if let value = try? await services.storage.get(namespace: "meeting", key: "started_at"),
        case .string(let iso) = value {
@@ -492,117 +390,7 @@ private func fetchRecordingSnapshot(services: SessionServices) async -> Recordin
     )
 }
 
-/// Resolve a meet42 subcommand invocation: the tool the meet42 plugin's skills
-/// install (`~/.work42/bin/meet42`) first, falling back to a PATH lookup via
-/// `/usr/bin/env` (Homebrew, a dev build). Duplicated from the calendar widget —
-/// no shared target between plugin widgets.
-private func recordingMeet42Invocation(
-    verb: String, extraArgs: [String] = []
-) -> (executable: URL, arguments: [String]) {
-    let installed = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".work42/bin/meet42")
-    if FileManager.default.isExecutableFile(atPath: installed.path) {
-        return (installed, [verb] + extraArgs)
-    }
-    return (URL(fileURLWithPath: "/usr/bin/env"), ["meet42", verb] + extraArgs)
-}
-
-/// `meet42 record start --manual --json`'s pre-daemonize stdout line.
-private struct RecordingRecordStartResult: Decodable {
-    let recordingId: String
-    let dir: String
-}
-
-/// `meet42 record start` prints ONE stdout line once capture has really started or failed. A failure is
-/// `{"started":false,"reason":"system_audio_denied","message":"…"}`.
-private struct RecordingRecordStartFailure: Decodable {
-    let started: Bool
-    let reason: String
-    let message: String?
-}
-
-private enum RecordingStartOutcome {
-    case started(RecordingRecordStartResult)
-    case failed(reason: String, message: String)
-    /// Nothing came back (the tool is missing or did not answer).
-    case unavailable
-}
-
-/// Launch `meet42 record start --manual` as a DETACHED process — NOT via
-/// `WidgetShellService` (bounded to 10s; `record start` daemonizes via
-/// setsid+execve with no fork, so it never exits on its own while recording,
-/// and the bounded shell service would kill it). `--manual` leaves stop policy
-/// with the explicit Recording controls. Unlike the old fire-and-forget
-/// version, this DOES need the daemon's stdout (the `{recordingId,dir}` line
-/// it prints before daemonizing, per s1) so the caller can seed this
-/// session's storage pointer — mirrors the calendar widget's
-/// `fireRecordStart`: redirect to a temp file and poll for the line to
-/// appear (NOT for the process to exit, since it deliberately never does).
-#if !os(macOS)
-/// Starting a recording launches a process, which only the Mac can do: an iPad sends the Record intent to the Mac, which
-/// runs the macOS version below. This stub only lets the widget compile for iOS.
-private func fireRecordingRecordStart() async -> RecordingStartOutcome { .unavailable }
-#else
-private func fireRecordingRecordStart() async -> RecordingStartOutcome {
-    let (exe, args) = recordingMeet42Invocation(
-        verb: "record", extraArgs: ["start", "--manual", "--json"]
-    )
-    let outURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("meet42-record-\(UUID().uuidString).json")
-    guard FileManager.default.createFile(atPath: outURL.path, contents: nil),
-          let outHandle = try? FileHandle(forWritingTo: outURL)
-    else { return .unavailable }
-    defer {
-        try? outHandle.close()
-        try? FileManager.default.removeItem(at: outURL)
-    }
-
-    let process = Process()
-    process.executableURL = exe
-    process.arguments = args
-    process.standardOutput = outHandle
-    process.standardError = FileHandle.nullDevice
-    do {
-        try process.run()
-    } catch {
-        return .unavailable
-    }
-
-    // The line appears once capture has started or failed. That can take a while: the first Record shows
-    // macOS's permission prompt and waits for the answer, so allow a minute.
-    for _ in 0..<240 {
-        if let data = try? Data(contentsOf: outURL), !data.isEmpty {
-            if let result = try? JSONDecoder().decode(RecordingRecordStartResult.self, from: data) {
-                return .started(result)
-            }
-            if let failure = try? JSONDecoder().decode(RecordingRecordStartFailure.self, from: data) {
-                return .failed(reason: failure.reason, message: failure.message ?? "Recording could not start.")
-            }
-            // A refusal payload (another recording holds the slot) carries a reason but no message.
-            if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-               let reason = object["reason"] as? String {
-                return .failed(reason: reason, message: "Another recording is already running.")
-            }
-        }
-        if !process.isRunning, (try? Data(contentsOf: outURL))?.isEmpty ?? true {
-            return .failed(reason: "capture_failed", message: "meet42 stopped before recording started.")
-        }
-        try? await Task.sleep(for: .milliseconds(250))
-    }
-    return .unavailable
-}
-#endif
-
 // MARK: - Active meeting ownership
-
-/// A process this model started and may have to stop. `Process` exists only on macOS, and everything that starts one
-/// runs on the Mac (the active-meeting agent is a Mac background agent), so on iOS this is an inert stand-in.
-#if os(macOS)
-private typealias WatchedProcess = Process
-#else
-private final class WatchedProcess {
-    func terminate() {}
-}
-#endif
 
 @Observable
 @MainActor
@@ -626,7 +414,6 @@ private final class RecordingMeetingModel {
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private let countdownTask = WidgetCountdownTask()
     @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
-    @ObservationIgnored private var watchProcess: WatchedProcess?
     @ObservationIgnored private var watchedBundleId: String?
     @ObservationIgnored private var suppressCloseUntilOpen = false
     @ObservationIgnored private var completionAttempted = false
@@ -664,7 +451,6 @@ private final class RecordingMeetingModel {
         watchTask?.cancel(); watchTask = nil
         countdownTask.cancel()
         heartbeatTask?.cancel(); heartbeatTask = nil
-        watchProcess?.terminate(); watchProcess = nil
         watchedBundleId = nil
     }
 
@@ -717,14 +503,9 @@ private final class RecordingMeetingModel {
             sourceIcon = Self.icon(bundleId: newBundleId)
         }
 
-        guard let recordingDir,
-              let result = try? await services.shell.run(command: "meet42 record status --json"),
-              result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let status = try? JSONDecoder().decode(RecordingRecordStatusPayload.self, from: data)
-        else { return }
+        guard let recordingDir else { return }
 
-        if status.recording, status.dir == recordingDir {
+        if MeetingRecorder.shared.isRecording(dir: recordingDir) {
             if phase == .inactive || phase == .stopped {
                 phase = .active
                 try? await services.pill.present(widgetId: "recording", sessionId: sessionId)
@@ -768,7 +549,6 @@ private final class RecordingMeetingModel {
 
     private func stopWatch() {
         watchTask?.cancel(); watchTask = nil
-        watchProcess?.terminate(); watchProcess = nil
         watchedBundleId = nil
     }
 
@@ -789,30 +569,13 @@ private final class RecordingMeetingModel {
         heartbeatTask = nil
     }
 
-    #if !os(macOS)
-    /// The call-detection watcher is a process on the Mac; this model only runs there.
-    private func runWatchOnce(bundleId: String) async {}
-    #else
+    /// `meet42 watch` for this meeting's app, run by Work42; its end (the command exited) lets the outer task start it again.
     private func runWatchOnce(bundleId: String) async {
-        let invocation = recordingMeet42Invocation(
-            verb: "watch", extraArgs: ["--bundle-id", bundleId, "--json"]
-        )
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = invocation.executable
-        process.arguments = invocation.arguments
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return }
-        watchProcess = process
-        // A closed pipe simply ends the stream, letting the outer task respawn the watcher.
-        for await line in recordingAsyncLines(from: output.fileHandleForReading) {
-            guard !Task.isCancelled else { break }
-            await handleWatchLine(line)
+        guard let shell = services?.shell else { return }
+        await streamMeet42Lines("meet42 watch --bundle-id \(recordingShellQuote(bundleId)) --json", shell: shell) { [weak self] line in
+            await self?.handleWatchLine(line)
         }
-        if watchProcess === process { watchProcess = nil }
     }
-    #endif
 
     private func handleWatchLine(_ line: String) async {
         guard let data = line.data(using: .utf8),
@@ -865,25 +628,10 @@ private final class RecordingMeetingModel {
             recoverFromCompletionFailure()
             return
         }
-        let stop: WidgetShellResult
-        do {
-            stop = try await services.shell.run(
-                command: "meet42 record stop --dir \(recordingShellQuote(recordingDir))"
-            )
-        } catch {
-            Meet42Trace.log("recording", "recording-stop-failed", [
-                "sessionId": sessionId, "reason": reason, "error": String(describing: error),
-            ])
-            recoverFromCompletionFailure()
-            return
-        }
-        guard stop.exitCode == 0 else {
-            Meet42Trace.log("recording", "recording-stop-failed", [
-                "sessionId": sessionId, "reason": reason,
-                "exitCode": stop.exitCode, "stderr": stop.stderr,
-            ])
-            recoverFromCompletionFailure()
-            return
+        // Ends capture and lets the transcript write its last words. A recording that already ended (Work42 lost it, or the other
+        // control stopped it first) needs no stopping: the meeting is still marked over below.
+        if MeetingRecorder.shared.isRecording(dir: recordingDir) {
+            await MeetingRecorder.shared.stop(dir: recordingDir)
         }
         stopHeartbeat()
         guard await setMeetingValue("ended_at", isoNow(), tools: services.tools) else {
@@ -930,17 +678,27 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
     private var model: RecordingMeetingModel?
     @ObservationIgnored private var labelTask: Task<Void, Never>?
 
+    private var sessionId: String?
+
     func start(services: WidgetBackgroundServices) {
+        sessionId = services.sessionId
+        // A recording the Record button starts in this session belongs to this agent, so it outlives the tile.
+        MeetingRecorder.shared.register(sessionId: services.sessionId, services: services)
         let model = RecordingMeetingRegistry.shared.model(for: services.sessionId)
         self.model = model
         model.start(services: services)
         labelTask?.cancel()
-        labelTask = Task { [weak self] in await self?.runLabels(services) }
+        labelTask = Task { [weak self] in
+            await Meet42Trace.configure(storage: services.storage)
+            await self?.runLabels(services)
+        }
     }
 
     func stop() {
         labelTask?.cancel()
         labelTask = nil
+        if let sessionId { MeetingRecorder.shared.unregister(sessionId: sessionId) }
+        sessionId = nil
         model?.stop()
         model = nil
     }
@@ -961,7 +719,7 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
             }
             if now.timeIntervalSince(lastSetup) >= 60 {
                 lastSetup = now
-                needsSetup = await Self.setupNeeded(services.shell)
+                needsSetup = await Self.setupNeeded(services)
             }
             var labels: [WidgetHeaderLabel] = []
             if startFailed {
@@ -975,12 +733,13 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
         }
     }
 
-    /// True when `meet42` can't be run or any permission is not granted.
-    private static func setupNeeded(_ shell: any WidgetShellService) async -> Bool {
-        guard let result = try? await shell.run(command: "meet42 permissions --json"), result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return true }
-        return rows.contains { ($0["status"] as? String) != "granted" }
+    /// True when any of the four permissions Work42 holds for meet42 is not granted, or the `meet42` command line can't be run.
+    private static func setupNeeded(_ services: WidgetBackgroundServices) async -> Bool {
+        for permission in PluginPermission.allCases {
+            guard let status = try? await services.permissions.status(permission), status == .granted else { return true }
+        }
+        guard let located = try? await services.shell.run(command: "command -v meet42"), located.exitCode == 0 else { return true }
+        return false
     }
 }
 
@@ -991,14 +750,7 @@ private final class RecordingMeetingAgent: WidgetBackgroundAgent {
 /// device list on disk and the menu reads it synchronously, together with the saved selection, every time it is
 /// asked. The CLI call only refreshes the file.
 private enum MicCache {
-    private static var directory: URL {
-        #if os(macOS)
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".work42/meet42")
-        #else
-        // Only the Mac's mic menu reads this cache; on iOS the path only has to be valid.
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".work42/meet42")
-        #endif
-    }
+    private static var directory: URL { RealHome.meet42Folder }
 
     static func write(_ rows: [[String: Any]]) {
         let devices = rows.compactMap { row -> [String: String]? in
@@ -1067,6 +819,9 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
     /// Active session services — set in `activate`, cleared in `deactivate`.
     @ObservationIgnored private var services: SessionServices? = nil
 
+    /// True while a Record press is waiting for capture to start (a second press then does nothing).
+    @ObservationIgnored private var startingManualRecording = false
+
     /// Background state-poll task (recording state + mic options).
     @ObservationIgnored private var statePollTask: Task<Void, Never>? = nil
 
@@ -1106,17 +861,14 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                 perform: {}      // never called — action-area-only intent
             ),
 
-            // ── 2. record ────────────────────────────────────────────────────
-            // meet42-recording-lifecycle-rework s5: manual Record uses the
-            // SAME session-agnostic primitive the calendar detection agent
-            // uses. `fireRecordingRecordStart` returning non-nil IS the
-            // confirmation (it only returns once the daemon's pre-daemonize
-            // stdout line appears, which only prints after the singleton
-            // check passes — no separate confirm-poll needed, unlike the old
-            // fire-and-forget version). `--manual` means no trigger call, so
-            // no auto-stop — only this Stop intent (or the pill's) ends it.
+            // ── 2. record-start ─────────────────────────────────────────────
+            // Manual Record uses the SAME recorder the calendar detection agent uses (`MeetingRecorder`), which is Work42's
+            // audio and speech service behind the extension. The first Record can wait a minute on macOS's permission
+            // prompts, longer than an intent may take to answer (10 s), so the press returns at once and the start finishes
+            // in the background: the tile's state and the `start_error` banner say how it went. Manual means no trigger call,
+            // so no auto-stop: only the Stop intent (or the pill's) ends it.
             WidgetIntentSpec(
-                name: "record",
+                name: "record-start",
                 title: "Record",
                 icon: "record.circle",
                 brandColorHex: "#7C3AED",
@@ -1125,39 +877,13 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                 isEnabled: { [weak self] in !(self?.isRecordingThisSession ?? false) },
                 perform: { [weak self] in
                     guard let self, let svc = self.services, let sessionId = svc.sessionId else { return }
-                    let outcome = await fireRecordingRecordStart()
-                    guard case .started(let started) = outcome else {
-                        Meet42Trace.log("recording", "manual-record-aborted", ["sessionId": sessionId])
-                        // Say why, in the tile: a permission that was turned off, a mic that went missing.
-                        var failure = WidgetJSONValue.object([
-                            "reason": .string("capture_failed"),
-                            "message": .string("meet42 didn\u{2019}t answer. Check that it is installed."),
-                        ])
-                        if case .failed(let reason, let message) = outcome {
-                            failure = .object(["reason": .string(reason), "message": .string(message)])
-                        }
-                        try? await svc.storage.set(key: "start_error", value: failure)
-                        return
-                    }
-                    try? await svc.storage.delete(key: "start_error")
-                    Meet42Trace.log("recording", "manual-record-started",
-                        ["sessionId": sessionId, "recordingId": started.recordingId])
-
-                    // Seed THIS session's pointer + the started_at workflow
-                    // gate. A write into THIS widget's own session's "meeting"
-                    // namespace — services.storage can't target it (restricted
-                    // to the widget's own namespace, "recording"), so it goes
-                    // through the `storage_set` tool.
-                    _ = await setMeetingValue("recording_dir", started.dir, tools: svc.tools)
-                    _ = await setMeetingValue("started_at", isoNow(), tools: svc.tools)
-                    await self.refreshRecordingState()
-                    try? await svc.pill.present(widgetId: "recording", sessionId: sessionId)
+                    Task { await self.beginManualRecording(svc, sessionId: sessionId) }
                 }
             ),
 
-            // ── 3. stop ──────────────────────────────────────────────────────
+            // ── 3. record-stop ──────────────────────────────────────────────
             WidgetIntentSpec(
-                name: "stop",
+                name: "record-stop",
                 title: "Stop",
                 icon: "stop.fill",
                 brandColorHex: "#7C3AED",
@@ -1173,24 +899,56 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
                 },
                 livePeriodicTick: 1,
                 perform: { [weak self] in
-                    guard let self, let svc = self.services, let sessionId = svc.sessionId,
-                          let recordingDir = await fetchRecordingDir(services: svc)
-                    else { return }
-                    // meet42 record stop just touches a marker file and
-                    // returns immediately — the daemon honors it in ~1s now
-                    // (s2's off-main stop-detection loop), safe via the
-                    // bounded shell service. --dir, not --session-dir (s1
-                    // dropped that flag — meet42 record is session-agnostic).
-                    _ = try? await svc.shell.run(
-                        command: "meet42 record stop --dir \(recordingShellQuote(recordingDir))"
-                    )
-                    _ = await setMeetingValue("ended_at", isoNow(), tools: svc.tools)
-                    try? await svc.pill.dismiss(widgetId: "recording")
-                    Meet42Trace.log("recording", "manual-stop", ["sessionId": sessionId])
-                    await self.refreshRecordingState()
+                    guard let self, let svc = self.services, let sessionId = svc.sessionId else { return }
+                    Task { await self.endManualRecording(svc, sessionId: sessionId) }
                 }
             ),
         ]
+    }
+
+    // MARK: - Manual Record / Stop
+
+    /// Starts a recording for this session and, once capture is running, seeds the session's pointer and the `started_at`
+    /// workflow gate. A press while one is starting is ignored.
+    private func beginManualRecording(_ svc: SessionServices, sessionId: String) async {
+        guard !startingManualRecording else { return }
+        startingManualRecording = true
+        defer { startingManualRecording = false }
+
+        let outcome = await MeetingRecorder.shared.start(services: MeetingRecorder.shared.services(for: svc), app: "Manual", bundleId: "")
+        switch outcome {
+        case .started(let recordingId, let dir):
+            try? await svc.storage.delete(key: "start_error")
+            Meet42Trace.log("recording", "manual-record-started", ["sessionId": sessionId, "recordingId": recordingId])
+            // Seed THIS session's pointer + the started_at workflow gate. A write into THIS widget's own session's "meeting"
+            // namespace — services.storage can't target it (restricted to the widget's own namespace, "recording"), so it
+            // goes through the `storage_set` tool.
+            _ = await setMeetingValue("recording_dir", dir, tools: svc.tools)
+            _ = await setMeetingValue("started_at", isoNow(), tools: svc.tools)
+            await refreshRecordingState()
+            try? await svc.pill.present(widgetId: "recording", sessionId: sessionId)
+        case .refused:
+            Meet42Trace.log("recording", "manual-record-aborted", ["sessionId": sessionId, "reason": "already-recording"])
+            await storeStartFailure(svc, reason: "already_recording", message: "Another recording is already running.")
+        case .failed(let reason, let message):
+            Meet42Trace.log("recording", "manual-record-aborted", ["sessionId": sessionId, "reason": reason])
+            // Say why, in the tile: a permission that was turned off, a mic that went missing.
+            await storeStartFailure(svc, reason: reason, message: message)
+        }
+    }
+
+    private func storeStartFailure(_ svc: SessionServices, reason: String, message: String) async {
+        try? await svc.storage.set(key: "start_error", value: .object(["reason": .string(reason), "message": .string(message)]))
+    }
+
+    /// Ends this session's recording, then marks the meeting over (`ended_at`) and takes the pill down.
+    private func endManualRecording(_ svc: SessionServices, sessionId: String) async {
+        guard let recordingDir = await fetchRecordingDir(services: svc) else { return }
+        await MeetingRecorder.shared.stop(dir: recordingDir)
+        _ = await setMeetingValue("ended_at", isoNow(), tools: svc.tools)
+        try? await svc.pill.dismiss(widgetId: "recording")
+        Meet42Trace.log("recording", "manual-stop", ["sessionId": sessionId])
+        await refreshRecordingState()
     }
 
     // MARK: - Lifecycle
@@ -1367,7 +1125,7 @@ private struct RecordingTileView: View {
     /// The signed-in account (name and profile photo) for my own lines; nil until read, or when
     /// signed out, in which case my avatar falls back to initials.
     @State private var account: WidgetAccountUser?
-    @State private var speakersWatcher = WidgetFileWatcher()
+    @State private var speakersWatcher = RecordingFileWatcher()
     /// `speakers.json`, re-read only when the watcher sees it change (not on every transcript update).
     @State private var speakers: [String: ResolvedSpeaker] = [:]
     #if !os(macOS)
@@ -1856,27 +1614,3 @@ private struct RecordingAccessory: View {
         )
     }
 }
-
-// MARK: - Hosting without the plugin loader
-
-/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
-/// The plugin loader builds the same class through `work42_widget_main`.
-public func meet42MakeWidget() -> any Work42Widget { RecordingWidget() }
-
-// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
-// C symbols, and a host that links several widgets has no use for them.
-#if !MEET42_WIDGETS_LIBRARY
-// MARK: - Widget entry-point ABI
-
-@_cdecl("work42_widget_sdk_version")
-public func work42_widget_sdk_version() -> Int32 { Work42SDKCompatibility.versionProbeValue }
-
-@_cdecl("work42_widget_main")
-public func work42_widget_main() -> UnsafeMutableRawPointer {
-    nonisolated(unsafe) var result: UnsafeMutableRawPointer!
-    MainActor.assumeIsolated {
-        result = WidgetEntryPoint.register(RecordingWidget())
-    }
-    return result
-}
-#endif

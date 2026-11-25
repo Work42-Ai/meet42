@@ -1,22 +1,37 @@
 manifest_version: 2
 name: meet42
-version: 1.6.1
+version: 2.0.0
 description: >
   The meeting vertical, extracted from work42 into a first-party plugin
   (meet42-plugin-conversion, M2). Provides the `meeting` workflow (Prepare for
   Meeting -> In Meeting -> Summary -> Done, driven entirely by recording-
   lifecycle storage signals), the `event` session type (its Brief and Recap tabs show the
   `meeting-brief` and `meeting-summary` artifacts as artifact tiles), the event-details /
-  recording / annotations / calendar widgets
-  (which render over files in the session dir + the standalone `meet42` CLI's
-  verbs), the recording widget's active-meeting background agent, the calendar
-  widget's mic-open detection + background-session handoff and scheduler reconciler, the `meet42-prep`
+  recording / annotations / calendar / permissions widgets, the recording widget's
+  active-meeting background agent, the calendar widget's mic-open detection +
+  background-session handoff and scheduler reconciler, the `meet42-prep`
   skill (type-scoped), a "New Event" create-intent, and an onCreate hook that
-  shells `meet42 snapshot` to write meeting.json. All privileged calendar/audio
-  work lives in the standalone meet42 tool (github.com/Work42-Ai/meet42), which this
-  plugin's skills install from its signed releases; this plugin is UI + orchestration.
+  links a new session to its calendar event. The plugin runs in its own extension process and
+  holds no privacy permission: Work42 holds the microphone, system-audio, calendar and
+  speech-recognition permissions and records, transcribes and reads the calendars for it
+  (SDK 3.3.0 services). The standalone meet42 tool (github.com/Work42-Ai/meet42) keeps the
+  calendar copy and the recordings readable by agents; this plugin is UI + orchestration.
 author: work42
-sdk_version: 3.0.0
+sdk_version: 3.3.0
+runtime: extension
+extension_bundle_id: com.work42.meet42.extension
+file_access:
+  - path: ~/.work42/meet42
+    mode: read-write
+permissions:
+  - name: microphone
+    reason: Records your side of a meeting you start, to make a private transcript on this Mac.
+  - name: system-audio
+    reason: Hears the other side of the call so it can be transcribed. It never records your screen.
+  - name: calendars
+    reason: Lists your meetings and prepares a session for each one.
+  - name: speech-recognition
+    reason: Turns meeting audio into text on this Mac.
 requires: []
 global_skills: meet42-setup
 notification_types:

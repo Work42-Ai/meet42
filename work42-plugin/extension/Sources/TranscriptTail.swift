@@ -143,15 +143,11 @@ final class TranscriptTail {
         } else if !update.lines.isEmpty {
             lines.append(contentsOf: update.lines)
         }
-        if Self.perfLogging {
-            FileHandle.standardError.write(Data(
-                "[perf] TranscriptTail +\(update.lines.count) parsed\(update.replacesAll ? " (replace)" : ""), \(lines.count) total\n".utf8
-            ))
+        // Off unless `meet42/perf` is switched on in storage; the line goes to the trace log (an extension's stderr is not seen).
+        if Meet42Trace.perfEnabled {
+            Meet42Trace.log("perf", "transcript-tail", [
+                "parsed": update.lines.count, "replace": update.replacesAll, "total": lines.count,
+            ])
         }
     }
-
-    private static let perfLogging: Bool = {
-        guard let value = ProcessInfo.processInfo.environment["WORK42_PERF"]?.lowercased() else { return false }
-        return !["", "0", "false", "no", "off"].contains(value)
-    }()
 }

@@ -125,90 +125,6 @@ func calShellQuote(_ s: String) -> String {
     "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-/// Line-buffered stdout reader driven by `FileHandle.readabilityHandler`
-/// (callback on read-readiness) rather than `FileHandle.bytes.lines`, whose
-/// `for await` performs a synchronous blocking `read()` on whichever thread
-/// picks up the continuation — pinning one of Swift Concurrency's limited,
-/// process-wide cooperative threads for as long as the pipe stays open
-/// (here, the lifetime of a `meet42 watch` process, which by design never
-/// exits on its own).
-func calAsyncLines(from fileHandle: FileHandle) -> AsyncStream<String> {
-    // GCD serializes a single FileHandle's readabilityHandler invocations
-    // (one event-source callback at a time), so this buffer is never
-    // touched concurrently despite the compiler being unable to prove it.
-    nonisolated final class LineBuffer: @unchecked Sendable {
-        private var data = Data()
-        nonisolated func extractLines(appending chunk: Data) -> [String] {
-            data.append(chunk)
-            var lines: [String] = []
-            while let newline = data.firstIndex(of: 0x0A) {
-                if let line = String(data: data[..<newline], encoding: .utf8) {
-                    lines.append(line)
-                }
-                data.removeSubrange(...newline)
-            }
-            return lines
-        }
-        nonisolated func drainRemainder() -> String? {
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return nil }
-            return line
-        }
-    }
-
-    return AsyncStream { continuation in
-        let buffer = LineBuffer()
-        fileHandle.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else {
-                handle.readabilityHandler = nil
-                if let line = buffer.drainRemainder() { continuation.yield(line) }
-                continuation.finish()
-                return
-            }
-            for line in buffer.extractLines(appending: chunk) {
-                continuation.yield(line)
-            }
-        }
-        continuation.onTermination = { _ in
-            fileHandle.readabilityHandler = nil
-        }
-    }
-}
-
-// MARK: - Meet42Trace (duplicated per widget — no shared target; same convention as shell-quote helpers)
-
-/// Append one JSON-line trace event to ~/.work42/meet42/trace.jsonl.
-/// Best-effort (never throws, never blocks). Disabled when MEET42_TRACE=0.
-private enum Meet42Trace {
-    static func log(_ src: String, _ evt: String, _ fields: [String: Any] = [:]) {
-        guard ProcessInfo.processInfo.environment["MEET42_TRACE"] != "0" else { return }
-        var row = fields
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        row["ts"]  = f.string(from: Date())
-        row["pid"] = Int(getpid())
-        row["src"] = src
-        row["evt"] = evt
-        guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
-              var line = String(data: data, encoding: .utf8) else { return }
-        line += "\n"
-        let root = (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42")
-        let path = (root as NSString).appendingPathComponent("trace.jsonl")
-        // Rotate past 5 MB.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-           let size = attrs[.size] as? Int, size > 5 * 1024 * 1024 {
-            rename(path, path + ".1")
-        }
-        // Ensure the directory exists before opening.
-        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: nil)
-        // O_APPEND|O_CREAT|O_WRONLY: atomic across processes for small writes.
-        let fd = open(path, O_APPEND | O_CREAT | O_WRONLY, 0o644)
-        guard fd >= 0 else { return }
-        line.withCString { _ = write(fd, $0, strlen($0)) }
-        close(fd)
-    }
-}
-
 // MARK: - CLICalendarStore (shared shape; duplicated per widget — no shared target)
 
 /// Reproduces the subset of MeetingsStore's published surface the calendar-only
@@ -453,7 +369,7 @@ final class CLICalendarStore {
     /// Running both commands every 2 s launched a process about once a second, each one
     /// opening the calendar database (WOR-420).
     private static let watchedPaths: [String] = {
-        let dir = (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42")
+        let dir = RealHome.meet42Folder.path
         return ["calendar.db", "calendar.db-wal", "modes.json"].map { (dir as NSString).appendingPathComponent($0) }
     }()
     private static let fallbackInterval: TimeInterval = 60
@@ -1897,16 +1813,6 @@ private func meetingAppIcon(bundleId: String) -> PlatformImage? {
     #endif
 }
 
-/// A process the call-detection agent started and may have to stop. `Process` exists only on macOS, and everything that
-/// starts one runs on the Mac (this agent is a Mac background agent), so on iOS this is an inert stand-in.
-#if os(macOS)
-private typealias WatchedProcess = Process
-#else
-private final class WatchedProcess {
-    func terminate() {}
-}
-#endif
-
 /// A resolved detection the agent hands to the pill. Carries the display data +
 /// two callbacks the pill invokes (Record now / Skip) so the side effects stay
 /// owned by the agent, not the view.
@@ -2202,7 +2108,7 @@ private struct ResolvedAssistedMeeting {
 /// bookkeeping to get wrong.
 private enum DetectorLock {
     private static var path: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent(".work42/meet42/detector.lock")
+        RealHome.meet42Folder.appendingPathComponent("detector.lock").path
     }
 
     /// The fd we hold the lock on, once claimed. -1 means not held.
@@ -2254,9 +2160,11 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
     @ObservationIgnored private var services: WidgetBackgroundServices?
     @ObservationIgnored private var watchTask: Task<Void, Never>?
-    @ObservationIgnored private var watchProcess: WatchedProcess?
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var syncChangesTask: Task<Void, Never>?
+    @ObservationIgnored private var syncRunning = false
+    @ObservationIgnored private var syncAgain = false
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
     /// The "Meeting detected" notification on the pill, while one is showing (`notification_post` / `notification_dismiss`).
     @ObservationIgnored private var detectedNotificationId: String?
@@ -2281,6 +2189,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
     func start(services s: WidgetBackgroundServices) {
         services = s
+        Task { await Meet42Trace.configure(storage: s.storage) }
         ownsDetectorLock = DetectorLock.claim()
         if ownsDetectorLock {
             beginWatching(s)
@@ -2305,9 +2214,9 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
     func stop() {
         watchTask?.cancel(); watchTask = nil
-        watchProcess?.terminate(); watchProcess = nil
         reconcileTask?.cancel(); reconcileTask = nil
         syncTask?.cancel(); syncTask = nil
+        syncChangesTask?.cancel(); syncChangesTask = nil
         countdownTask?.cancel(); countdownTask = nil
         detectorClaimTask?.cancel(); detectorClaimTask = nil
         if ownsDetectorLock {
@@ -2333,28 +2242,77 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
 
     // MARK: Calendar sync (background)
 
-    /// Keeps meet42's own copy of the calendar (`calendar.db`) current: nothing else runs the sync since meet42
-    /// left the app, so a new event would never reach the Calendar, Event details or the brief. Runs `meet42 sync`
-    /// at start and then every two minutes while this agent owns the detector lock. It only runs once Calendar
-    /// access has been granted to meet42, so it never raises a permission prompt from the background; a failed
-    /// run is logged to the trace and simply retried on the next cycle.
+    /// Keeps meet42's own copy of the calendar (`calendar.db`) current, so a new event reaches the Calendar, Event details
+    /// and the brief. Work42 reads the calendars (`services.calendar`, with the Calendar permission it holds for meet42) and
+    /// the events go to `meet42 sync --events`, which writes the database. Runs at start, whenever Work42 reports the
+    /// calendars changed, and every five minutes as a backstop, while this agent owns the detector lock. It only runs once
+    /// Calendar access has been granted, so it never raises a permission prompt from the background; a failed run is
+    /// logged to the trace and retried on the next trigger.
     private func beginCalendarSync(_ s: WidgetBackgroundServices) {
         syncTask?.cancel()
+        syncChangesTask?.cancel()
+        // At start, and every five minutes after as a backstop.
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
-                if let self { await self.syncCalendarOnce(s) }
-                try? await Task.sleep(for: .seconds(120))
+                await self?.requestSync(s)
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
+        // And whenever Work42 reports the calendars changed.
+        syncChangesTask = Task { [weak self] in
+            while !Task.isCancelled {
+                for await _ in s.calendar.changes() {
+                    if Task.isCancelled { return }
+                    await self?.requestSync(s)
+                }
+                // The stream ends at once while Calendar access is not granted: look again in a while.
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }
 
+    /// One sync at a time: a trigger that arrives while one runs asks for one more when it ends, so the last change is never lost.
+    private func requestSync(_ s: WidgetBackgroundServices) async {
+        if syncRunning {
+            syncAgain = true
+            return
+        }
+        syncRunning = true
+        repeat {
+            syncAgain = false
+            await syncCalendarOnce(s)
+        } while syncAgain && !Task.isCancelled
+        syncRunning = false
+    }
+
     private func syncCalendarOnce(_ s: WidgetBackgroundServices) async {
-        guard let permissions = try? await s.shell.run(command: "meet42 permissions --json"), permissions.exitCode == 0,
-              let data = permissions.stdout.data(using: .utf8),
-              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]],
-              rows.contains(where: { ($0["name"] as? String) == "calendar" && ($0["status"] as? String) == "granted" })
-        else { return }
-        guard let result = try? await s.shell.run(command: "meet42 sync") else {
+        guard (try? await s.permissions.status(.calendars)) == .granted else { return }
+        let now = Date()
+        let from = now.addingTimeInterval(-7 * 24 * 60 * 60), to = now.addingTimeInterval(90 * 24 * 60 * 60)
+        let events: [CalendarEvent]
+        do {
+            events = try await s.calendar.events(from: from, to: to)
+        } catch {
+            Meet42Trace.log("calendar", "sync-failed", ["reason": "calendar", "error": String(describing: error)])
+            return
+        }
+        // The events travel to the command line in a file in meet42's own folder (the extension may write there).
+        let folder = RealHome.meet42Folder
+        let file = folder.appendingPathComponent("sync-events-\(UUID().uuidString).json")
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(events).write(to: file, options: .atomic)
+        } catch {
+            Meet42Trace.log("calendar", "sync-failed", ["reason": "write", "error": String(describing: error)])
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: file) }
+        let iso = ISO8601DateFormatter()
+        let command = "meet42 sync --events \(calShellQuote(file.path)) --from \(calShellQuote(iso.string(from: from)))"
+            + " --to \(calShellQuote(iso.string(from: to))) --json"
+        guard let result = try? await s.shell.run(command: command, timeout: .seconds(60)) else {
             Meet42Trace.log("calendar", "sync-failed", ["reason": "shell"])
             return
         }
@@ -2380,39 +2338,13 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         }
     }
 
-    /// Spawn `meet42 watch` as a DETACHED process (not via `WidgetShellService`
-    /// — it's bounded to a 10s timeout and `watch` never exits on its own) and
-    /// consume its line-delimited JSON stdout until it dies, then return so the
-    /// caller's loop respawns it.
-    #if !os(macOS)
-    /// The call-detection watcher is a process on the Mac; this agent only runs there.
-    private func runWatchOnce(_ s: WidgetBackgroundServices) async {}
-    #else
+    /// Runs `meet42 watch` through Work42's shell (`shell.start`: it never exits on its own, so the bounded `run` would kill it) and
+    /// reads its line-delimited JSON until it dies, then returns so the caller's loop respawns it.
     private func runWatchOnce(_ s: WidgetBackgroundServices) async {
-        let (exe, args) = Self.meet42Invocation(verb: "watch")
-        let process = Process()
-        process.executableURL = exe
-        process.arguments = args
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe() // discard — meet42 watch logs via Meet42Trace
-
-        do {
-            try process.run()
-        } catch {
-            return
+        await streamMeet42Lines("meet42 watch", shell: s.shell) { [weak self] line in
+            await self?.handleWatchLine(line, s)
         }
-        watchProcess = process
-
-        // The pipe closing (child dies) ends the stream — that's just our
-        // cue to fall through and let the caller's loop respawn it.
-        for await line in calAsyncLines(from: outPipe.fileHandleForReading) {
-            if Task.isCancelled { break }
-            await handleWatchLine(line, s)
-        }
-        watchProcess = nil
     }
-    #endif
 
     private func handleWatchLine(_ line: String, _ s: WidgetBackgroundServices) async {
         guard let data = line.data(using: .utf8),
@@ -2430,20 +2362,6 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         default:
             break
         }
-    }
-
-    /// Resolve a meet42 subcommand invocation: the tool the meet42 plugin's
-    /// skills install (`~/.work42/bin/meet42`) first, falling back to a PATH
-    /// lookup via `/usr/bin/env` (Homebrew, a dev build). meet42 is not part of
-    /// the Work42 app.
-    private static func meet42Invocation(
-        verb: String, extraArgs: [String] = []
-    ) -> (executable: URL, arguments: [String]) {
-        let installed = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".work42/bin/meet42")
-        if FileManager.default.isExecutableFile(atPath: installed.path) {
-            return (installed, [verb] + extraArgs)
-        }
-        return (URL(fileURLWithPath: "/usr/bin/env"), ["meet42", verb] + extraArgs)
     }
 
     // MARK: (b) Prompt — once per call session, event-driven
@@ -2572,23 +2490,21 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         Task { [weak self] in
             guard let self else { return }
 
-            // Start first so capture is live before the slower session work.
-            // The Work42 app PID owns this automatic recording; app exit is
-            // the recorder's only implicit finalization condition.
-            let recording: RecordStartResult
-            switch await Self.fireRecordStart(
-                app: app, bundleId: bundleId, ownerPid: getpid()
+            // Start first so capture is live before the slower session work. The recording belongs to this agent's
+            // scope: it ends when Work42 quits or this agent's session goes away, and not before.
+            let recording: (recordingId: String, dir: String)
+            switch await MeetingRecorder.shared.start(
+                services: RecorderServices(background: s), app: app, bundleId: bundleId
             ) {
-            case .started(let r):
-                recording = r
-            case .refused(let refusal):
-                Meet42Trace.log("detect", "start-aborted",
-                    ["callId": callId, "reason": "record-refused", "owner": refusal.owner])
+            case .started(let recordingId, let dir):
+                recording = (recordingId, dir)
+            case .refused(let owner):
+                Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "record-refused", "owner": owner])
                 self.showFailure(meeting, message: "Recording is already in use")
                 return
-            case nil:
-                Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "record-start-timeout"])
-                self.showFailure(meeting, message: "Couldn't start recording")
+            case .failed(let reason, let message):
+                Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": reason])
+                self.showFailure(meeting, message: message.isEmpty ? "Couldn't start recording" : message)
                 return
             }
             Meet42Trace.log("detect", "record-started", ["callId": callId, "recordingId": recording.recordingId])
@@ -2605,7 +2521,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 guard await Self.seedExistingSession(
                     existing, metadata: metadata, tools: s.tools
                 ) else {
-                    await Self.stopRecording(recording.dir, shell: s.shell)
+                    await MeetingRecorder.shared.stop(dir: recording.dir)
                     self.showFailure(meeting, message: "Couldn't prepare the session")
                     return
                 }
@@ -2615,7 +2531,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                     name: meeting.sessionName, eventId: meeting.eventId, storage: metadata, tools: s.tools
                 ) else {
                     Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "mint-failed"])
-                    await Self.stopRecording(recording.dir, shell: s.shell)
+                    await MeetingRecorder.shared.stop(dir: recording.dir)
                     self.showFailure(meeting, message: "Couldn't create the session")
                     return
                 }
@@ -2628,7 +2544,7 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
                 // session-owned Recording pill without selecting that session.
                 try await s.pill.present(widgetId: "recording", sessionId: sessionId)
             } catch {
-                await Self.stopRecording(recording.dir, shell: s.shell)
+                await MeetingRecorder.shared.stop(dir: recording.dir)
                 self.showFailure(meeting, message: "Couldn't open the meeting pill")
                 return
             }
@@ -2637,69 +2553,6 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             Meet42Trace.log("detect", "pill-presented", ["callId": callId, "sessionId": sessionId])
         }
     }
-
-    /// `meet42 record start`'s pre-daemonize stdout line (printed BEFORE
-    /// RecordCommand's execve, so it appears well under 1s regardless of the
-    /// slow capture init that follows).
-    private struct RecordStartResult: Decodable {
-        let recordingId: String
-        let dir: String
-    }
-
-    /// `meet42 record start`'s refusal payload when the machine-wide
-    /// singleton is already held — printed to the SAME stdout destination,
-    /// just as fast, when a recording can't start.
-    private struct RecordStartRefusal: Decodable {
-        let started: Bool
-        let reason: String
-        let owner: String
-    }
-
-    private enum RecordStartOutcome {
-        case started(RecordStartResult)
-        case refused(RecordStartRefusal)
-    }
-
-    #if !os(macOS)
-    /// Launching the recorder is a process on the Mac; this agent only runs there.
-    private static func fireRecordStart(
-        app: String, bundleId: String, ownerPid: Int32
-    ) async -> RecordStartOutcome? { nil }
-    #else
-    /// Launch the daemonizing recorder and await only its first JSON line.
-    private static func fireRecordStart(
-        app: String, bundleId: String, ownerPid: Int32
-    ) async -> RecordStartOutcome? {
-        let (exe, args) = Self.meet42Invocation(verb: "record", extraArgs: [
-            "start", "--app", app, "--bundle-id", bundleId,
-            "--owner-pid", String(ownerPid), "--json",
-        ])
-        let process = Process()
-        process.executableURL = exe
-        process.arguments = args
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let waiter = FirstLineProcessOutput()
-        guard let data = await waiter.read(from: outPipe, timeout: 5) else {
-            process.terminate()
-            return nil
-        }
-        if let result = try? JSONDecoder().decode(RecordStartResult.self, from: data) {
-            return .started(result)
-        }
-        if let refusal = try? JSONDecoder().decode(RecordStartRefusal.self, from: data) {
-            return .refused(refusal)
-        }
-        process.terminate()
-        return nil
-    }
-    #endif
 
     /// "Chrome — Oct 2, 2:14 PM" — the name fed to the `session_start`
     /// tool for an ad-hoc mint. Must be unique per call (not just per app)
@@ -2766,16 +2619,6 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
             }
         }
         return true
-    }
-
-    private static func stopRecording(_ dir: String, shell: any WidgetShellService) async {
-        let command = "meet42 record stop --dir \(calShellQuote(dir))"
-        let result = try? await shell.run(command: command)
-        guard result?.exitCode != 0 else { return }
-        // The CLI only creates this marker. Fall back to the same signal if
-        // shell dispatch itself failed so setup failure cannot orphan capture.
-        let marker = (dir as NSString).appendingPathComponent(".meet42-record-stop")
-        _ = FileManager.default.createFile(atPath: marker, contents: Data())
     }
 
     private func showFailure(_ meeting: DetectedMeeting, message: String) {
@@ -2892,64 +2735,6 @@ final class CalendarDetectionAgent: WidgetBackgroundAgent {
         f.dateFormat = "h:mm a"
         let range = "\(f.string(from: event.startsAt)) – \(f.string(from: event.endsAt))"
         return "\(app) · Scheduled \(range)"
-    }
-}
-
-// MARK: - CLI decode targets (start sequence)
-
-/// Reads exactly the recorder's pre-daemonize JSON line without waiting for
-/// the long-lived child process to close stdout.
-private nonisolated final class FirstLineProcessOutput: @unchecked Sendable {
-    private let lock = NSLock()
-    private var buffer = Data()
-    private var finished = false
-    private var continuation: CheckedContinuation<Data?, Never>?
-    private weak var handle: FileHandle?
-
-    func read(from pipe: Pipe, timeout: TimeInterval) async -> Data? {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            self.continuation = continuation
-            self.handle = pipe.fileHandleForReading
-            lock.unlock()
-
-            pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                self?.receive(handle.availableData)
-            }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [weak self] in
-                self?.finish(nil)
-            }
-        }
-    }
-
-    private func receive(_ data: Data) {
-        guard !data.isEmpty else {
-            lock.lock()
-            let partial = buffer.isEmpty ? nil : buffer
-            lock.unlock()
-            finish(partial)
-            return
-        }
-        lock.lock()
-        guard !finished else { lock.unlock(); return }
-        buffer.append(data)
-        let newline = buffer.firstIndex(of: 0x0A)
-        let line = newline.map { Data(buffer[..<$0]) }
-        lock.unlock()
-        if let line { finish(line) }
-    }
-
-    private func finish(_ result: Data?) {
-        lock.lock()
-        guard !finished else { lock.unlock(); return }
-        finished = true
-        let continuation = self.continuation
-        self.continuation = nil
-        let handle = self.handle
-        self.handle = nil
-        lock.unlock()
-        handle?.readabilityHandler = nil
-        continuation?.resume(returning: result)
     }
 }
 
@@ -3353,27 +3138,3 @@ private struct CalendarPillView: View {
         return f.string(from: d)
     }
 }
-
-// MARK: - Hosting without the plugin loader
-
-/// A new instance of this widget, for a host that builds widgets itself (the iPad app, through `Meet42Widgets`).
-/// The plugin loader builds the same class through `work42_widget_main`.
-public func meet42MakeWidget() -> any Work42Widget { CalendarWidget() }
-
-// The plugin loader's entry points. Not part of the SwiftPM library build: every widget would export the same two
-// C symbols, and a host that links several widgets has no use for them.
-#if !MEET42_WIDGETS_LIBRARY
-// MARK: - Widget entry-point ABI
-
-@_cdecl("work42_widget_sdk_version")
-public func work42_widget_sdk_version() -> Int32 { Work42SDKCompatibility.versionProbeValue }
-
-@_cdecl("work42_widget_main")
-public func work42_widget_main() -> UnsafeMutableRawPointer {
-    nonisolated(unsafe) var result: UnsafeMutableRawPointer!
-    MainActor.assumeIsolated {
-        result = WidgetEntryPoint.register(CalendarWidget())
-    }
-    return result
-}
-#endif

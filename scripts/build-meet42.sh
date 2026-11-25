@@ -2,16 +2,13 @@
 # build-meet42.sh — release build of meet42 as a small app bundle (meet42.app, the CLI is its executable), signed
 # with a persistent Developer ID, the Hardened Runtime and meet42's own identifier and entitlements.
 #
-# Why this matters: meet42 is a plain command-line binary (no .app bundle) that needs macOS Calendar,
-# Microphone, Speech Recognition and Screen Recording access. macOS reads the permission-prompt wording from
-# the binary's embedded __TEXT,__info_plist section, and keys each grant to its code-signing identity. So a
-# shippable meet42:
-#   1. embeds Resources/meet42-Info.plist at link time (-sectcreate),
-#   2. is signed with a PERSISTENT Developer ID (not the ad-hoc signature `swift build` applies, whose hash
-#      changes on every build and makes macOS forget the user's grants),
-#   3. uses the identifier com.work42.meet42, so prompts and grants belong to "meet42", and
-#   4. carries Resources/meet42.entitlements (microphone + calendar): under the Hardened Runtime, which
-#      notarization requires, macOS denies both without a prompt unless the entitlement is present.
+# Since 2.0.0 meet42 holds no privacy permission: Work42 records, transcribes and reads the calendars for the meet42
+# plugin. What a shippable meet42 still needs is a stable identity, so Work42 can keep it at ~/.work42/meet42.app:
+#   1. it embeds Resources/meet42-Info.plist at link time (-sectcreate),
+#   2. it is signed with a PERSISTENT Developer ID (not the ad-hoc signature `swift build` applies), under the
+#      Hardened Runtime, which notarization requires,
+#   3. it uses the identifier com.work42.meet42, and
+#   4. it carries Resources/meet42.entitlements, which is empty: nothing in it needs an exception to the Hardened Runtime.
 #
 # Usage:
 #   DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" scripts/build-meet42.sh [--configuration release]
