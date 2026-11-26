@@ -17,7 +17,7 @@ description: >
   (SDK 3.3.0 services). The standalone meet42 tool (github.com/Work42-Ai/meet42) keeps the
   calendar copy and the recordings readable by agents; this plugin is UI + orchestration.
 author: work42
-sdk_version: 3.3.0
+sdk_version: 3.5.0
 runtime: extension
 extension_bundle_id: com.work42.meet42.extension
 file_access:

@@ -24,5 +24,9 @@ nonisolated final class Meet42Extension: Work42PluginExtension {
         ]
     }
 
+    @MainActor var sessionTypes: [ExtensionSessionTypeFactory] {
+        [ExtensionSessionTypeFactory("event") { EventSessionType() }]
+    }
+
     @MainActor var sessionHooks: (any Work42SessionHooks)? { Meet42Hooks() }
 }

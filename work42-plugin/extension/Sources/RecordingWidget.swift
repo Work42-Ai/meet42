@@ -297,7 +297,7 @@ private final class RecordingFileWatcher {
 
 /// ISO 8601 (with fractional seconds) of now — matches the format the capture
 /// engine writes for `ts`, and what the gates expect for started_at/ended_at.
-private func isoNow() -> String {
+func isoNow() -> String {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return f.string(from: Date())
@@ -338,7 +338,7 @@ private struct RecordingSessionIdentityPayload: Decodable {
 
 /// Write one `meeting/<key>` string into THIS session's work42.db storage with the `storage_set` tool.
 /// `services.storage` can't: it is restricted to the widget's own namespace ("recording").
-private func setMeetingValue(_ key: String, _ value: String, tools: any WidgetToolService) async -> Bool {
+func setMeetingValue(_ key: String, _ value: String, tools: any WidgetToolService) async -> Bool {
     do {
         _ = try await tools.call(
             server: "work42-session", tool: "storage_set",
@@ -361,7 +361,7 @@ private func setMeetingValue(_ key: String, _ value: String, tools: any WidgetTo
 /// sessionDirectory)` — the CORRECT directory, no shell/CLI indirection at
 /// all. nil for a session with no recording attached yet (a plain event
 /// session, or one where Record hasn't been clicked).
-private func fetchRecordingDir(services: SessionServices) async -> String? {
+func fetchRecordingDir(services: SessionServices) async -> String? {
     guard let value = try? await services.storage.get(namespace: "meeting", key: "recording_dir"),
           case .string(let dir) = value
     else { return nil }
@@ -1184,7 +1184,7 @@ private struct RecordingTileView: View {
         }
         .task {
             while !Task.isCancelled {
-                if case .loaded(let event) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                if case .loaded(let event) = await MeetEventLoader.load(calendar: services.calendar, storage: services.storage) {
                     eventState.currentUser = event.attendees.first(where: { $0.isCurrentUser })
                 }
                 account = await services.account?.currentUser()
@@ -1257,8 +1257,8 @@ private struct RecordingTileView: View {
     /// The permission page that fixes `reason`, or nil when the failure is not a permission one.
     private func permissionToOpen(for reason: String) -> String? {
         switch reason {
-        case "system_audio_denied": return "systemAudio"
-        case "microphone_denied": return "microphone"
+        case "system_audio_denied": return PluginPermission.systemAudio.rawValue
+        case "microphone_denied": return PluginPermission.microphone.rawValue
         default: return nil
         }
     }
@@ -1274,8 +1274,9 @@ private struct RecordingTileView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let permission = permissionToOpen(for: error.reason) {
-                    Button("Open Settings") {
-                        Task { _ = try? await services.shell.run(command: "meet42 permissions open \(permission)") }
+                    Button("Turn on") {
+                        // Work42 asks as the first use would (its own pill, then macOS) instead of a command line opening Settings.
+                        Task { if let wanted = PluginPermission(rawValue: permission) { _ = try? await services.permissions.request(wanted) } }
                     }
                     .glassSubtleCapsule(tint: DT.systemAccent)
                 }

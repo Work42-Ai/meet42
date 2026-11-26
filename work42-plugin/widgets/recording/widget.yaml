@@ -1,0 +1,8 @@
+id: recording
+title: Recording
+description: Records the meeting (your microphone and the other side) with a live transcript.
+mcps:
+  - id: recordings
+    title: Recordings
+    description: Start and stop this session's recording, and read its transcript.
+    source: extension

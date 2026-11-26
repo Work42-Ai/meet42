@@ -28,6 +28,14 @@
     "meet42-brief",
     "meet42-summary"
   ],
+  "session_mcps": [
+    {
+      "id": "calendar",
+      "title": "Calendar",
+      "description": "Reads the calendar event this session is for, and the events around it.",
+      "source": "extension"
+    }
+  ],
   "create_intent": "new-event",
   "args": [
     {

@@ -51,7 +51,7 @@ final class EventDetailsWidget: Work42Widget, Work42WidgetBackground {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                if case .loaded(let loaded) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                if case .loaded(let loaded) = await MeetEventLoader.load(calendar: services.calendar, storage: services.storage) {
                     self?.event = loaded
                 } else {
                     self?.event = nil
@@ -118,7 +118,7 @@ final class EventDetailsLabelAgent: WidgetBackgroundAgent {
             var lastLoad = Date.distantPast
             while !Task.isCancelled {
                 if Date().timeIntervalSince(lastLoad) >= 60 {
-                    if case .loaded(let loaded) = await MeetEventLoader.load(shell: services.shell, storage: services.storage) {
+                    if case .loaded(let loaded) = await MeetEventLoader.load(calendar: services.calendar, storage: services.storage) {
                         event = loaded
                     } else {
                         event = nil
@@ -193,7 +193,7 @@ private struct EventDetailsView: View {
         }
         .task {
             while !Task.isCancelled {
-                state = await MeetEventLoader.load(shell: services.shell, storage: services.storage)
+                state = await MeetEventLoader.load(calendar: services.calendar, storage: services.storage)
                 try? await Task.sleep(for: .seconds(60))
             }
         }

@@ -270,7 +270,7 @@ final class CLICalendarStore {
 
     /// One event in full (`meet42 show <id> --json`), for the event popup.
     func loadMeetEvent(_ id: String) async -> MeetEventState {
-        await MeetEventLoader.load(eventID: id, shell: services.shell)
+        await MeetEventLoader.load(eventID: id, calendar: services.calendar)
     }
 
     /// Creates the event's session in the foreground through the app's global `session.open` intent, so Work42

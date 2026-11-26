@@ -88,44 +88,83 @@ enum MeetEventState {
     /// The session has no calendar event (an ad-hoc event session).
     case unlinked
     case loaded(MeetEvent)
-    /// `meet42 show` could not be run or understood; `command` and `message` are shown to the user.
+    /// The event could not be read from the calendars; `command` names what was asked and `message` says why, both shown to the user.
     case failed(command: String, message: String)
+}
+
+extension MeetEvent.Attendee {
+    init(name: String?, email: String?, status: String, isOrganizer: Bool, isCurrentUser: Bool) {
+        self.name = name
+        self.email = email
+        self.status = status
+        self.isOrganizer = isOrganizer
+        self.isCurrentUser = isCurrentUser
+    }
+}
+
+extension MeetEvent {
+
+    /// The event as Work42's calendar service describes it (`services.calendar`), in the shape the widgets draw. The session Work42
+    /// minted for an event is not part of the calendar, so `sessionId` is nil here.
+    init(calendar event: CalendarEvent) {
+        id = event.id
+        title = event.title
+        calendarTitle = event.calendar
+        source = event.source ?? "other"
+        status = event.status ?? "none"
+        location = event.location
+        organizer = event.organizer
+        notesHTML = event.notes
+        meetingURL = event.url
+        calendarColor = event.calendarColor
+        sessionId = nil
+        startsAt = event.start
+        endsAt = event.end
+        allDay = event.isAllDay
+        if let details = event.attendeeDetails {
+            attendees = details.map {
+                Attendee(name: $0.name, email: $0.email, status: $0.status, isOrganizer: $0.isOrganizer, isCurrentUser: $0.isCurrentUser)
+            }
+        } else {
+            attendees = event.attendees.map { Attendee(name: $0, email: nil, status: "unknown", isOrganizer: false, isCurrentUser: false) }
+        }
+    }
 }
 
 enum MeetEventLoader {
 
+    /// How far each side of today an event is looked for when only its id is known. EventKit answers by date range, never by id.
+    static let lookBehind: TimeInterval = 365 * 86_400
+    static let lookAhead: TimeInterval = 365 * 86_400
+
     /// The session's linked event: its id comes from session storage `meeting/event_id`.
-    static func load(shell: any WidgetShellService, storage: any WidgetStorageService) async -> MeetEventState {
+    static func load(calendar: any WidgetCalendarService, storage: any WidgetStorageService, now: Date = Date()) async -> MeetEventState {
         guard case .string(let id)? = try? await storage.get(namespace: "meeting", key: "event_id"), !id.isEmpty else {
             return .unlinked
         }
-        return await load(eventID: id, shell: shell)
+        return await load(eventID: id, calendar: calendar, now: now)
     }
 
-    /// One event by its calendar id, through `meet42 show <id> --json`.
-    static func load(eventID id: String, shell: any WidgetShellService) async -> MeetEventState {
-        let command = "meet42 show \(shellQuote(id)) --json"
-        guard let result = try? await shell.run(command: command) else {
-            return .failed(command: command, message: "Couldn\u{2019}t run meet42.")
-        }
-        guard result.exitCode == 0, let data = result.stdout.data(using: .utf8) else {
-            let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return .failed(command: command, message: detail.isEmpty ? "meet42 exited with \(result.exitCode)." : detail)
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { d in
-            let text = try d.singleValueContainer().decode(String.self)
-            let plain = ISO8601DateFormatter()
-            let fractional = ISO8601DateFormatter()
-            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = plain.date(from: text) ?? fractional.date(from: text) { return date }
-            throw DecodingError.dataCorrupted(.init(codingPath: d.codingPath, debugDescription: "bad date \(text)"))
-        }
+    /// One event by its calendar id. The id is EventKit's `eventIdentifier`, which is what `services.calendar` reports as `id`.
+    static func load(eventID id: String, calendar: any WidgetCalendarService, now: Date = Date()) async -> MeetEventState {
+        let command = "calendar event \(id)"
         do {
-            return .loaded(try decoder.decode(MeetEvent.self, from: data))
+            if let found = try await find(eventID: id, calendar: calendar, now: now) { return .loaded(MeetEvent(calendar: found)) }
+            return .failed(command: command, message: "That event is no longer in your calendars.")
         } catch {
-            return .failed(command: command, message: "Couldn\u{2019}t read meet42\u{2019}s answer: \(error.localizedDescription)")
+            let detail = ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return .failed(command: command, message: detail.isEmpty ? "Couldn\u{2019}t read your calendar." : detail)
         }
+    }
+
+    /// The event with this id, or nil when it is in no calendar. Shared by the tiles and the `get_event` tool.
+    static func find(eventID id: String, calendar: any WidgetCalendarService, now: Date = Date()) async throws -> CalendarEvent? {
+        // Around now first (an event you are about to open is almost always near), then the whole window.
+        let near = try await calendar.events(from: now.addingTimeInterval(-14 * 86_400), to: now.addingTimeInterval(60 * 86_400))
+        if let found = near.first(where: { $0.id == id }) { return found }
+        let wide = try await calendar.events(from: now.addingTimeInterval(-lookBehind), to: now.addingTimeInterval(lookAhead))
+        return wide.first(where: { $0.id == id })
     }
 
     /// POSIX single-quote escaping for a value interpolated into a `/bin/sh -c` command line.
