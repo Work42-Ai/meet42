@@ -32,6 +32,8 @@ permissions:
     reason: Lists your meetings and prepares a session for each one.
   - name: speech-recognition
     reason: Turns meeting audio into text on this Mac.
+  - name: run-commands
+    reason: Runs the meet42 command-line tool that keeps the calendar copy and the recordings readable, until meet42 no longer needs it.
 requires: []
 global_skills: meet42-setup
 notification_types:
