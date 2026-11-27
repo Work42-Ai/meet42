@@ -15,17 +15,15 @@
 //   • Pill  — two-row active state with source-app identity, Open Session,
 //            scheduled-time rail, Stop timer, and 10-second Stay/Stop prompt.
 //
-// RECORDING TRUTH, per meet42-detection-rework's singleton redesign: `meet42
-// record status` is the single source of truth for "is MY session the one
+// RECORDING TRUTH: `MeetingRecorder.shared.isRecording(dir:)` is the single source of truth for "is MY session the one
 // currently recording" (AC7) — NOT session storage. `SessionServices.storage`
 // is FILE-backed for a non-task session (`SessionStorageBackend`), a
 // DIFFERENT store than the `storage_set` tool (always work42.db) — so
 // Stable `meeting/*` metadata is read through `services.storage`; writes to
 // that cross-widget namespace use the `storage_set` tool (`services.tools`).
-// Manual Record/Stop share the same capture primitive as Calendar:
-// `meet42 record start` is a detached, fire-and-forget process (not via
-// `WidgetShellService`, which is bounded to 10s and would kill the
-// never-exiting daemon), confirmed via a bounded `meet42 record status` poll.
+// Manual Record/Stop share the same capture primitive as Calendar: `MeetingRecorder.shared.start` / `stop`.
+// What still shells the `meet42` CLI here: the call-app watch (`meet42 watch`) and the microphone list and choice
+// (`meet42 mics`).
 
 #if canImport(AppKit)
 import AppKit
@@ -803,13 +801,13 @@ final class RecordingWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackgro
 
     // MARK: - Recording state (drives action-area intent isEnabled / labels)
 
-    /// True when `meet42 record status` reports THIS session as the active
+    /// True when `MeetingRecorder` reports THIS session's recording directory as the active
     /// recording (AC7 — the single source of truth, not session storage).
     /// Drives the `record` intent (hidden while true) and the `stop` intent
     /// (visible/enabled while true). Observed by the host at render time.
     private(set) var isRecordingThisSession: Bool = false
 
-    /// `meeting/started_at`, read via the shelled CLI; drives the stop
+    /// `meeting/started_at`, read through `services.storage`; drives the stop
     /// intent's live mm:ss timer.
     private(set) var recordingStartedAt: Date? = nil
 
