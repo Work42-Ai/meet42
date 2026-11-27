@@ -14,9 +14,13 @@ meeting session:
 2. Present the active-meeting pill with the detected app identity and session.
 3. Watch that app's mic state and own the 10-second Stay/Stop decision.
 
-Calendar owns global mic-open detection and session creation. The `meet42
-record` daemon only captures and responds to an explicit stop marker (plus its
-optional Work42 owner PID); it has no mic-close or UI policy.
+Calendar owns global mic-open detection and session creation. Capture is Work42's: the
+extension records through `services.audio` and writes the transcript from `services.speech`
+(`MeetingRecorder`), which has no mic-close or UI policy and ends only when this widget (or Calendar's
+setup failure path) asks it to, or when its scope ends (Work42 quit, the agent's session went away).
+
+Microphone is **You** and system audio is **Them**. The voices within Them are not told apart (the speaker diarization the
+old `meet42 record` daemon ran is not part of Work42's speech service); the agent can still name Them in `speakers.json`.
 
 ## Transcript avatars and speaker names
 
@@ -38,8 +42,7 @@ not granted, which opens the permissions widget. There is no label while recordi
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
 on this, check `command -v meet42`: it must print a path. If it prints nothing, or a meet42 command fails
 because the tool is missing, ask the user whether to install it (never install it without their yes); if they
-agree, follow the `meet42-setup` skill, which installs the signed release, grants its permissions and loads the
-calendar.
+agree, follow the `meet42-setup` skill, which checks the command line and the permissions Work42 holds for meet42.
 
 ## Tile
 
@@ -56,7 +59,7 @@ Recording:
 
 | Key | Meaning |
 |---|---|
-| `recording_dir` | Recording directory returned by `meet42 record start`. |
+| `recording_dir` | The recording's folder, `~/.work42/meet42/recordings/<id>`, returned by the recorder. |
 | `started_at` | ISO 8601 capture start. |
 | `title` | Matched calendar title, or detected app name for ad-hoc calls. |
 | `source_app` | Detected meeting app display name. |
@@ -64,9 +67,8 @@ Recording:
 | `scheduled_start` / `scheduled_end` | Optional matched-event bounds. |
 | `ended_at` | Written only when Recording/manual controls explicitly stop. |
 
-`meet42 record status --json` remains recording truth. Recording compares its
-stored `recording_dir` with the active status directory before presenting or
-controlling the pill.
+`MeetingRecorder` is recording truth. Recording compares its stored `recording_dir` with the folder
+the recorder is running in before presenting or controlling the pill.
 
 ## Background agent
 
@@ -88,7 +90,7 @@ and heartbeat tasks are cancelled when the agent stops or hot-reloads.
 Mic-open keeps or restores the active state. Mic-close shows a 10-second
 `Auto-stopping` prompt. `Stay` suppresses further close handling until the app
 opens its mic again. `Stop` and countdown expiry share one idempotent completion
-attempt: send final activity, stop capture, verify the single
+attempt: send final activity, stop the recorder, verify the single
 `meeting/ended_at` write succeeded, then enter stopped state and dismiss. The
 storage write's existing workflow nudge advances the active session normally;
 there are no transition retries or forced workflow transitions.
@@ -117,8 +119,12 @@ title, replacing row 2 with `Auto-stopping in Ns`, **Stay**, and **Stop**.
 
 ## Manual controls
 
-The action-area microphone picker and manual Record/Stop remain available.
-Manual Record uses `meet42 record start --manual --json`, stores
+The action-area microphone picker and manual Record/Stop remain available. They are the `selectMic`, `record-start`
+and `record-stop` intents (palette ids `widget.recording.record-start` and `widget.recording.record-stop`), the same on the
+Mac, on the iPad (served by the Mac) and for agents. The picker lists inputs with `meet42 mics` and saves the choice
+(`meet42 mics select`); the recorder passes it to Work42 as the microphone to record. Record returns at once and the start
+finishes in the background (the first Record can wait on macOS's permission prompts); a failure shows in the tile's banner
+(`recording/start_error`). Manual Record starts the recorder, stores
 `recording_dir` and `started_at`, and presents Recording. Because manual
 recordings have no `source_bundle_id`, they show `In Progress` and do not run a
 mic watcher. Manual Stop uses the same explicit stop and `ended_at` path.

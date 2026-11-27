@@ -41,7 +41,7 @@ line), and lets you set the AI assist mode per calendar and per event.
   completely; their title, event id, and schedule never leak into an ad-hoc
   call. The prompt title is the existing session's authoritative name, or the
   exact future ad-hoc session name chosen before the prompt appears.
-  Starting launches an app-owned recorder, keeps the same 412x108 shared pill
+  Starting begins a recording through Work42 (`MeetingRecorder`), keeps the same 412x108 shared pill
   shell and meeting identity while its lower row reports setup progress, then
   seeds an existing prepared event session or runs
   `session_start` for a new one.
@@ -63,11 +63,13 @@ line), and lets you set the AI assist mode per calendar and per event.
 
 ## Background sync and the event popup
 
-**Calendar sync.** meet42 keeps its own copy of your calendar, and nothing else refreshes it since meet42 left the
-Work42 app. While Work42 runs, this widget's background agent (the one that holds the detector lock) runs
-`meet42 sync` when it starts and every two minutes, but only after Calendar access has been granted to meet42, so it
-never raises a permission prompt from the background. A new or edited event appears within about two minutes. Each run
-is logged in `~/.work42/meet42/trace.jsonl` (`src: calendar`, `sync-ok` / `sync-failed`).
+**Calendar sync.** meet42 keeps its own copy of your calendar (`calendar.db`). While Work42 runs, this widget's background
+agent (the one that holds the detector lock) reads the calendars through Work42's calendar service (`services.calendar`,
+with the Calendar permission Work42 holds for meet42), writes the events to a file in `~/.work42/meet42`, and runs
+`meet42 sync --events <file>`, which writes the database. It runs when it starts, whenever Work42 reports the calendars
+changed, and every five minutes as a backstop, but only after Calendar access has been granted, so it never raises a
+permission prompt from the background. A new or edited event appears within moments. Each run is logged in
+`~/.work42/meet42/trace.jsonl` (`src: calendar`, `sync-ok` / `sync-failed`).
 
 **Event popup.** Clicking an event opens a popup in the Event details style: the calendar's colour bar, source and
 status chips, title, absolute time, the meeting link (with its provider and a copy button), location, guests with their
@@ -90,5 +92,4 @@ still created in the background. The scheduler also skips events that already ha
 meet42 is a separate command-line tool (github.com/Work42-Ai/meet42), not part of the Work42 app. Before relying
 on this, check `command -v meet42`: it must print a path. If it prints nothing, or a meet42 command fails
 because the tool is missing, ask the user whether to install it (never install it without their yes); if they
-agree, follow the `meet42-setup` skill, which installs the signed release, grants its permissions and loads the
-calendar.
+agree, follow the `meet42-setup` skill, which checks the command line and the permissions Work42 holds for meet42.

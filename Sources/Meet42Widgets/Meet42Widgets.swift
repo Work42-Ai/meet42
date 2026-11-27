@@ -1,8 +1,8 @@
 // Meet42Widgets.swift — meet42's widgets, hosted without the plugin loader.
 //
-// On the Mac the plugin loader builds each widget from its own Sources folder and Work42 hosts it. Anything else that
-// shows these widgets (the Work42 iPad app) links this library instead: one SwiftPM target per widget, built from the
-// SAME files, and this file maps a widget id to its view. The widgets reach the Mac only through `SessionServices`
+// On the Mac the meet42 extension runs the widgets and Work42 hosts them. Anything else that shows these widgets (the Work42
+// iPad app) links this library instead: one SwiftPM target (`Meet42PluginWidgets`) built from the extension's own files, and
+// this file maps a widget id to its view. The widgets reach the Mac only through `SessionServices`
 // (shell, storage, files, platform), so on an iPad those calls are answered by the paired Mac.
 //
 // What stays on the Mac, on purpose: the action-area intents (Record, Stop, Join, the calendar's navigation) and the
@@ -12,11 +12,7 @@
 import SwiftUI
 import Work42PluginKit
 
-import Meet42AnnotationsWidget
-import Meet42CalendarWidget
-import Meet42EventDetailsWidget
-import Meet42PermissionsWidget
-import Meet42RecordingWidget
+import Meet42PluginWidgets
 
 public enum Meet42Widget {
 
@@ -47,19 +43,13 @@ public enum Meet42Widget {
     /// A new instance of the widget, or nil when `id` is not one of these widgets.
     @MainActor
     public static func makeWidget(id: String) -> (any Work42Widget)? {
-        switch normalizedID(id) {
-        case "annotations": Meet42AnnotationsWidget.meet42MakeWidget()
-        case "calendar": Meet42CalendarWidget.meet42MakeWidget()
-        case "event-details": Meet42EventDetailsWidget.meet42MakeWidget()
-        case "permissions": Meet42PermissionsWidget.meet42MakeWidget()
-        case "recording": Meet42RecordingWidget.meet42MakeWidget()
-        default: nil
-        }
+        guard let name = normalizedID(id) else { return nil }
+        return meet42MakeWidget(id: name)
     }
 
     /// The widget ids whose view needs `activate` to have run. Calendar's view reads a store the widget creates there.
     /// The others read what they show through `services`; their `activate` only starts polls that feed the Mac's
-    /// action-area intents (recording polls the CLI every 2 s), which on an iPad would be pure link traffic.
+    /// action-area intents (recording polls its state every 2 s), which on an iPad would be pure link traffic.
     static let activatedIDs: Set<String> = ["calendar"]
 
     /// The widget's content view for `id`, or nil when it is not one of these widgets.

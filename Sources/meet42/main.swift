@@ -1,13 +1,14 @@
-// meet42 — the standalone, open-source macOS calendar + meeting-capture CLI.
+// meet42 — the open-source macOS calendar + meetings CLI.
 //
 // Manual arg dispatch (no ArgumentParser). Read verbs go through the ported
-// Meet42Kit `CalendarStore`; `sync` drives Meet42CalendarSync; `record`
-// drives Meet42Capture. stdout carries verb output (JSON with `--json`, else
-// human text); all diagnostics go to stderr.
+// Meet42Kit `CalendarStore`; `sync` puts the events Work42 read into it. meet42
+// holds no privacy permission: Work42 reads the calendars and records the audio
+// (2.0.0), so there is no `record` and no `permissions` verb. stdout carries
+// verb output (JSON with `--json`, else human text); all diagnostics go to stderr.
 
 import Foundation
 
-let meet42Version = "1.6.0"
+let meet42Version = "2.0.0"
 
 let argv = CommandLine.arguments
 let command = argv.count > 1 ? argv[1] : "help"
@@ -31,9 +32,7 @@ enum Dispatcher {
         case "mics":     MicsCommand.mics(args: args)
         case "watch":    WatchCommand.watch(args: args)   // never returns
         case "modes":    DataCommands.modes(args: args)
-        case "permissions": await PermissionsCommand.permissions(args: args)
-        case "sync":     await SyncCommand.sync(args: args)
-        case "record":   await RecordCommand.record(args: args)
+        case "sync":     SyncCommand.sync(args: args)
         case "transcript": TranscriptCommand.transcript(args: args)
         case "notes":    NotesCommand.notes(args: args)
         case "trace":    TraceCommand.trace(args: args)
@@ -50,7 +49,7 @@ enum Dispatcher {
 
     static func printUsage() {
         print("""
-        meet42 v\(meet42Version) — calendar + meeting-capture CLI
+        meet42 v\(meet42Version) — calendar + meetings CLI
 
         Usage: meet42 <command> [options]
 
@@ -98,41 +97,14 @@ enum Dispatcher {
                 Set the session type a calendar's events start, or one event's
                 override of it. "default" clears it (event, or its calendar's).
 
-        Permissions:
-          permissions [--json]
-                Status of the four privacy permissions meet42 needs, in the
-                order calendar, microphone, speech, systemAudio: granted, denied,
-                not_determined or restricted.
-          permissions request <calendar|microphone|speech|systemAudio> [--json]
-                Show macOS's prompt for one permission (granted → exit 0).
-                macOS asks only once: a denied permission is switched on in
-                System Settings.
-          permissions open <calendar|microphone|speech|systemAudio>
-                Open that permission's System Settings page.
+        Calendar sync:
+          sync --events <file> [--from <iso>] [--to <iso>] [--json]
+                Replace the calendar copy for the window with the events in
+                <file> (a JSON array). Work42 reads your calendars with its own
+                Calendar permission and runs this itself; meet42 holds no
+                privacy permission and neither records nor reads calendars.
 
-        Sync / capture:
-          sync
-                Request Calendar access + run one full EventKit sync.
-          record start [--dir <dir>] [--device <uid>] [--app <name>]
-                       [--bundle-id <id>] [--owner-pid <pid>] [--manual] [--json]
-                Session-agnostic: allocates its OWN recordings dir under
-                ~/.work42/meet42/recordings/<recordingId>/ (or uses --dir if
-                given), daemonizes, and captures (transcription +
-                diarization) there. Prints {"recordingId","dir","started"}
-                on stdout BEFORE daemonizing, so a caller gets the path
-                immediately. Machine-wide singleton: refuses if a recording
-                is already active elsewhere. --app/--bundle-id label the
-                claim (for `record status`); default --app is "Manual".
-                --owner-pid ties an auto-detected capture to its owning app
-                process so app exit finalizes it. --manual omits ownership and
-                continues until an explicit `record stop`.
-          record stop [--dir <dir>]
-                Signal the capture daemon to finalize and exit. --dir
-                defaults to the active recording's dir when omitted.
-          record status [--json]
-                Print whether a recording is active and, if so, its
-                recordingId/dir/app/startedAt/ownerPid — the single source of truth
-                every surface reads instead of session storage.
+        Recordings:
           transcript --dir <dir> [--json]
                 Read-only. A recording's conversation.jsonl and speakers.json.
                 --json prints {"dir","conversation","speakers"}: the files

@@ -1,0 +1,3139 @@
+// Widget.swift — meet42's Calendar widget (meet42-plugin-conversion, s15).
+//
+// A calendar-only port of the app's MeetingsView
+// (`Sources/Work42App/Meetings/MeetingsView.swift`) + the shared day timeline
+// (`DayTimelineView.swift`) into a plugin widget that links ONLY
+// Work42PluginKit + Work42UI. The original drove everything through Flow42Core's
+// MeetingsStore / CalendarStore / PlannedDayStore / CalendarSyncService and
+// mixed real EventKit meetings with AI-schedule fires and work-blocks. A plugin
+// widget can't import Flow42Core, and the meet42 CLI only exposes calendar
+// events + per-calendar/-event assist modes, so this is SCOPED TO CALENDAR
+// DATA ONLY:
+//
+//   • Day / Week / Agenda calendar-event rendering is ported faithfully.
+//   • The per-calendar assist-mode picker (settings popover) and the per-event
+//     "Enable AI assistance" picker (event popover) are kept — they are the
+//     calendar's mode surface, backed by `meet42 modes get/set`.
+//   • DROPPED: all AI-schedule UI/code (the "+ New schedule" sheet, the AI
+//     Scheduler toggle, AISchedulesView, the AIPopover, AI-fire pills, the
+//     All/My/AI display filter, AI-schedule session handoff). DROPPED too: the
+//     sync-status / access-state header chip (there is no `meet42 status` verb)
+//     and the "Open in Calendar" action.
+//     TODO(meet42): work-blocks/AI-schedules re-added via a separate collection.
+//
+// DATA: a CLICalendarStore shells `meet42` (list + modes) and decodes local
+// CalEvent / CalMode mirrors, refreshing on a ~2s timer while mounted (the CLI
+// poll replaces the app store's db-mtime poller).
+
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+import Foundation
+import Observation
+import SwiftUI
+import Work42UI
+import Work42PluginKit
+
+// MARK: - CalMode (local mirror of CalendarStore.CalendarMode)
+
+/// Per-calendar / per-event assistance level. Raw values match meet42's
+/// `modes` vocabulary exactly (`view_only` / `assisted` / `ai_scheduled`).
+enum CalMode: String, Codable, Sendable, Equatable, CaseIterable {
+    case viewOnly = "view_only"
+    case assisted = "assisted"
+    case aiScheduled = "ai_scheduled"
+}
+
+// MARK: - CalEvent (local mirror of `meet42 list --json`)
+
+/// Local mirror of `Meet42Kit.CalendarEvent.Item`. Only the fields the calendar
+/// renders are declared; `JSONDecoder` ignores the rest. Property names +
+/// raw-value enum cases match the CLI's default JSON encoding, `.iso8601` dates.
+struct CalEvent: Codable, Identifiable, Equatable {
+
+    enum Source: String, Codable, Equatable {
+        case exchange, icloud, google, caldav, local, other
+    }
+    enum Status: String, Codable, Equatable {
+        case confirmed, tentative, canceled, none
+    }
+    enum AttendeeStatus: String, Codable, Equatable {
+        case unknown, pending, accepted, declined, tentative
+    }
+    struct Attendee: Codable, Equatable {
+        let name: String?
+        let email: String?
+        let status: AttendeeStatus
+        let isOrganizer: Bool
+        let isCurrentUser: Bool
+    }
+
+    let id: String
+    let calendarId: String
+    let calendarTitle: String?
+    let source: Source
+    let title: String
+    let notes: String?
+    let location: String?
+    let startsAt: Date
+    let endsAt: Date
+    let allDay: Bool
+    let organizer: String?
+    let attendees: [Attendee]
+    let status: Status
+    let url: String?
+    let meetingURL: String?
+    /// The Work42 session minted for this event (automatically 15 minutes before, or on demand), when there is one.
+    let sessionId: String?
+}
+
+// MARK: - modes get --json payload
+
+/// Mirror of `meet42 modes get --json` →
+/// `{"calendars":{id:mode},"events":{id:mode},"calendarTypes":{id:typeId},"eventTypes":{id:typeId}}`.
+/// The two type maps are missing from an older CLI's answer and decode as empty.
+private struct ModesPayload: Codable {
+    let calendars: [String: CalMode]
+    let events: [String: CalMode]
+    let calendarTypes: [String: String]
+    let eventTypes: [String: String]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        calendars = try container.decode([String: CalMode].self, forKey: .calendars)
+        events = try container.decode([String: CalMode].self, forKey: .events)
+        calendarTypes = try container.decodeIfPresent([String: String].self, forKey: .calendarTypes) ?? [:]
+        eventTypes = try container.decodeIfPresent([String: String].self, forKey: .eventTypes) ?? [:]
+    }
+
+    /// The session type an event starts: its override, else its calendar's default, else `event`.
+    func effectiveType(eventId: String, calendarId: String) -> String {
+        eventTypes[eventId] ?? calendarTypes[calendarId] ?? "event"
+    }
+}
+
+/// A session type the pickers offer: `session_types` rows, by id and name.
+struct CalTypeChoice: Identifiable, Equatable, Decodable {
+    let id: String
+    let name: String
+}
+
+/// Shell-quote a single argument (single-quote wrap, escape embedded quotes).
+func calShellQuote(_ s: String) -> String {
+    "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+// MARK: - CLICalendarStore (shared shape; duplicated per widget — no shared target)
+
+/// Reproduces the subset of MeetingsStore's published surface the calendar-only
+/// views read, sourced by shelling meet42 via `services.shell`. There is no
+/// `meet42 status` verb, so the sync-status / access-state header chip is
+/// dropped entirely (out of scope).
+@Observable
+@MainActor
+final class CLICalendarStore {
+
+    /// Events in the active window, sorted by `startsAt`.
+    var events: [CalEvent] = []
+    /// Per-calendar assistance preferences, keyed by `calendarId`.
+    var calendarModes: [String: CalMode] = [:]
+    /// Per-event overrides, keyed by `eventId`. Beats the calendar default.
+    var eventModes: [String: CalMode] = [:]
+    /// The session type each calendar's events start, keyed by `calendarId`. No entry = `event`.
+    var calendarTypes: [String: String] = [:]
+    /// The session type one event starts, keyed by `eventId`. Beats its calendar's.
+    var eventTypes: [String: String] = [:]
+    /// The session types the pickers offer (`session_types`); empty until loaded.
+    var sessionTypes: [CalTypeChoice] = []
+
+    enum ViewMode: String, CaseIterable, Identifiable, Sendable {
+        case day, week, agenda
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .day: return "Day"
+            case .week: return "Week"
+            case .agenda: return "Agenda"
+            }
+        }
+    }
+
+    var viewMode: ViewMode = .week
+    var referenceDate: Date = Date()
+
+    // MARK: Shared view (the Mac's calendar and an iPad's show the same window)
+
+    /// The view mode and date as shared through the widget's own storage (`view_state`). Every instance of this
+    /// calendar (the Mac's, and an iPad's) writes it when its mode or date changes and adopts a change another instance
+    /// made, so the Mac's action-area controls (Day / Week / Agenda, previous, today, next) move the calendar an iPad
+    /// draws too. Without it each instance would keep its own mode and date, and the controls would only reach the
+    /// Mac's.
+    private struct SharedView: Equatable {
+        let mode: ViewMode
+        let reference: Date
+        let writtenAt: Date
+
+        /// Dates are kept to the millisecond, which is what survives the trip through storage, so a value this
+        /// instance wrote compares equal to the same value read back.
+        init(mode: ViewMode, reference: Date, writtenAt: Date) {
+            self.mode = mode
+            self.reference = Self.millisecond(reference)
+            self.writtenAt = Self.millisecond(writtenAt)
+        }
+
+        init?(json: WidgetJSONValue?) {
+            guard case .object(let object)? = json,
+                  case .string(let rawMode)? = object["mode"], let mode = ViewMode(rawValue: rawMode),
+                  case .string(let rawReference)? = object["reference"], let reference = Self.formatter.date(from: rawReference),
+                  case .string(let rawWritten)? = object["written_at"], let written = Self.formatter.date(from: rawWritten)
+            else { return nil }
+            self.init(mode: mode, reference: reference, writtenAt: written)
+        }
+
+        var json: WidgetJSONValue {
+            .object([
+                "mode": .string(mode.rawValue),
+                "reference": .string(Self.formatter.string(from: reference)),
+                "written_at": .string(Self.formatter.string(from: writtenAt)),
+            ])
+        }
+
+        private static var formatter: ISO8601DateFormatter {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }
+
+        private static func millisecond(_ date: Date) -> Date {
+            Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded() / 1000)
+        }
+    }
+
+    private static let sharedViewKey = "view_state"
+    /// The widget's own namespace (its id), which is where `services.storage.set` writes. If the plugin loader renamed the
+    /// widget's slug (another plugin already had `calendar`), reads find nothing and the calendar behaves as it did.
+    private static let sharedViewNamespace = "calendar"
+    /// A shared state written this recently is what another device is showing right now, so an instance that starts
+    /// begins from it. An older one is a view someone left yesterday: the calendar starts on this week, as it always did.
+    private static let sharedViewFreshness: TimeInterval = 600
+
+    /// The last shared state this instance wrote or read: a different one in storage means another instance changed it.
+    @ObservationIgnored private var lastShared: SharedView?
+    /// Counts this instance's own changes, so a read that began before a change cannot undo it.
+    @ObservationIgnored private var localRevision = 0
+    @ObservationIgnored private var writesInFlight = 0
+    @ObservationIgnored private var sharedViewBaselined = false
+
+    /// This instance changed the mode or date: share it.
+    private func localViewChanged() {
+        localRevision += 1
+        let shared = SharedView(mode: viewMode, reference: referenceDate, writtenAt: Date())
+        lastShared = shared
+        writesInFlight += 1
+        let storage = services.storage
+        Task {
+            try? await storage.set(key: Self.sharedViewKey, value: shared.json)
+            writesInFlight -= 1
+        }
+    }
+
+    /// Adopts a change another instance shared. Called at the start of every refresh (the ~2 s poll).
+    private func adoptSharedView() async {
+        let revision = localRevision
+        let value = try? await services.storage.get(namespace: Self.sharedViewNamespace, key: Self.sharedViewKey)
+        // The answer is stale when this instance changed (or is still writing) since the read began: keep its own tap.
+        guard revision == localRevision, writesInFlight == 0 else { return }
+        guard let remote = SharedView(json: value) else {
+            sharedViewBaselined = true   // nothing shared yet, or storage is not available here
+            return
+        }
+        if !sharedViewBaselined {
+            sharedViewBaselined = true
+            lastShared = remote
+            if Date().timeIntervalSince(remote.writtenAt) < Self.sharedViewFreshness { apply(remote) }
+            return
+        }
+        guard remote != lastShared else { return }
+        lastShared = remote
+        apply(remote)
+    }
+
+    private func apply(_ shared: SharedView) {
+        viewMode = shared.mode
+        referenceDate = shared.reference
+    }
+
+    @ObservationIgnored private let services: SessionServices
+    @ObservationIgnored private var timer: Timer?
+
+    /// One event in full (`meet42 show <id> --json`), for the event popup.
+    func loadMeetEvent(_ id: String) async -> MeetEventState {
+        await MeetEventLoader.load(eventID: id, calendar: services.calendar)
+    }
+
+    /// Creates the event's session in the foreground through the app's global `session.open` intent, so Work42
+    /// shows its "Setting up your Session" overlay and then opens the session selected. Throws when the intent fails.
+    func createEventSession(eventId: String, title: String) async throws {
+        let typeId = events.first { $0.id == eventId }.map(effectiveType(for:)) ?? eventTypes[eventId] ?? "event"
+        try await services.intents.execute(id: "session.open", params: [
+            "typeId": .string(typeId),
+            "name": .string(title),
+            "args": .object(["event_id": .string(eventId)]),
+        ])
+    }
+
+    /// Cancels the automatic session entry for an event whose session was created on demand.
+    func cancelScheduledSession(for eventId: String) async {
+        _ = try? await services.tools.call(
+            server: "work42-session", tool: "schedule_cancel",
+            arguments: ["key": .string("mtg:\(eventId)")], session: nil)
+    }
+
+    init(services: SessionServices) {
+        self.services = services
+    }
+
+    // MARK: Window
+
+    /// Active query window, derived from `viewMode + referenceDate`.
+    var window: (from: Date, to: Date) {
+        let cal = Calendar.current
+        switch viewMode {
+        case .day:
+            let s = cal.startOfDay(for: referenceDate)
+            return (s, cal.date(byAdding: .day, value: 1, to: s) ?? s)
+        case .week:
+            let s = Self.startOfWeek(referenceDate)
+            return (s, cal.date(byAdding: .day, value: 7, to: s) ?? s)
+        case .agenda:
+            let s = cal.startOfDay(for: Date())
+            return (s, cal.date(byAdding: .day, value: 30, to: s) ?? s)
+        }
+    }
+
+    static func startOfWeek(_ date: Date) -> Date {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+        return cal.date(from: comps) ?? cal.startOfDay(for: date)
+    }
+
+    func weekDays() -> [Date] {
+        let cal = Calendar.current
+        let start = Self.startOfWeek(referenceDate)
+        return (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: start) }
+    }
+
+    // MARK: Navigation
+
+    func goToPrevious() {
+        let cal = Calendar.current
+        switch viewMode {
+        case .day:  referenceDate = cal.date(byAdding: .day, value: -1, to: referenceDate) ?? referenceDate
+        case .week: referenceDate = cal.date(byAdding: .day, value: -7, to: referenceDate) ?? referenceDate
+        case .agenda: return
+        }
+        localViewChanged()
+        Task { await refresh() }
+    }
+
+    func goToNext() {
+        let cal = Calendar.current
+        switch viewMode {
+        case .day:  referenceDate = cal.date(byAdding: .day, value: 1, to: referenceDate) ?? referenceDate
+        case .week: referenceDate = cal.date(byAdding: .day, value: 7, to: referenceDate) ?? referenceDate
+        case .agenda: return
+        }
+        localViewChanged()
+        Task { await refresh() }
+    }
+
+    func goToToday() {
+        referenceDate = Date()
+        localViewChanged()
+        Task { await refresh() }
+    }
+
+    func setViewMode(_ mode: ViewMode) {
+        guard mode != viewMode else { return }
+        viewMode = mode
+        localViewChanged()
+        Task { await refresh() }
+    }
+
+    // MARK: Refresh (the CLI runs only when the calendar store changed)
+
+    /// The files `meet42 list` and `meet42 modes get` read. Their size and modification time
+    /// are checked every 2 s; the CLI runs only when one moved, or once a minute regardless.
+    /// Running both commands every 2 s launched a process about once a second, each one
+    /// opening the calendar database (WOR-420).
+    private static let watchedPaths: [String] = {
+        let dir = RealHome.meet42Folder.path
+        return ["calendar.db", "calendar.db-wal", "modes.json"].map { (dir as NSString).appendingPathComponent($0) }
+    }()
+    private static let fallbackInterval: TimeInterval = 60
+    @ObservationIgnored private var lastSignature = ""
+    @ObservationIgnored private var lastRefresh = Date.distantPast
+
+    private static func storeSignature() -> String {
+        watchedPaths.map { path in
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            return "\(modified):\(size)"
+        }.joined(separator: "|")
+    }
+
+    private func refreshIfStoreChanged() async {
+        let signature = Self.storeSignature()
+        guard signature != lastSignature || Date().timeIntervalSince(lastRefresh) >= Self.fallbackInterval else { return }
+        await refresh()
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        Task { await refresh() }
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refreshIfStoreChanged() }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func refresh() async {
+        // Taken before the reads, so a change landing while they run is picked up next tick.
+        lastSignature = Self.storeSignature()
+        lastRefresh = Date()
+        await adoptSharedView()
+        let (from, to) = window
+        let iso = ISO8601DateFormatter()
+        let listCmd = "meet42 list --from \(calShellQuote(iso.string(from: from)))"
+            + " --to \(calShellQuote(iso.string(from: to))) --json"
+        if let r = try? await services.shell.run(command: listCmd), r.exitCode == 0,
+           let data = r.stdout.data(using: .utf8) {
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+            if let items = try? dec.decode([CalEvent].self, from: data) {
+                events = items.sorted { $0.startsAt < $1.startsAt }
+            }
+        }
+        if let r = try? await services.shell.run(command: "meet42 modes get --json"),
+           r.exitCode == 0, let data = r.stdout.data(using: .utf8),
+           let payload = try? JSONDecoder().decode(ModesPayload.self, from: data) {
+            calendarModes = payload.calendars
+            eventModes = payload.events
+            calendarTypes = payload.calendarTypes
+            eventTypes = payload.eventTypes
+        }
+        await loadSessionTypes()
+    }
+
+    // MARK: Session types
+
+    /// The session types a person may pick for events, from the `session_types` tool. Home's own type is not offered.
+    private func loadSessionTypes() async {
+        guard let result = try? await services.tools.call(
+                server: "work42-session", tool: "session_types", arguments: [:], session: nil),
+              let data = try? JSONEncoder().encode(result),
+              let rows = try? JSONDecoder().decode([CalTypeChoice].self, from: data)
+        else { return }
+        let offered = rows.filter { $0.id != "main" }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if offered != sessionTypes { sessionTypes = offered }
+    }
+
+    /// The session type an event starts: its override, else its calendar's default, else `event`.
+    func effectiveType(for event: CalEvent) -> String {
+        eventTypes[event.id] ?? calendarTypes[event.calendarId] ?? "event"
+    }
+
+    /// Set a calendar's session type; nil goes back to `event`.
+    func setCalendarType(_ id: String, _ typeId: String?) {
+        calendarTypes[id] = typeId  // optimistic
+        let cmd = "meet42 modes set-type calendar \(calShellQuote(id)) \(calShellQuote(typeId ?? "default"))"
+        Task {
+            _ = try? await services.shell.run(command: cmd)
+            await refresh()
+        }
+    }
+
+    /// Set one event's session type; nil follows its calendar.
+    func setEventType(_ id: String, _ typeId: String?) {
+        eventTypes[id] = typeId  // optimistic
+        let cmd = "meet42 modes set-type event \(calShellQuote(id)) \(calShellQuote(typeId ?? "default"))"
+        Task {
+            _ = try? await services.shell.run(command: cmd)
+            await refresh()
+        }
+    }
+
+    // MARK: Modes
+
+    /// Resolution order: per-event override → owning-calendar preference →
+    /// `.viewOnly`.
+    func mode(for event: CalEvent) -> CalMode {
+        if let override = eventModes[event.id] { return override }
+        if let calMode = calendarModes[event.calendarId] { return calMode }
+        return .viewOnly
+    }
+
+    func setCalendarMode(_ id: String, _ m: CalMode) {
+        calendarModes[id] = m  // optimistic
+        let cmd = "meet42 modes set calendar \(calShellQuote(id)) \(m.rawValue)"
+        Task {
+            _ = try? await services.shell.run(command: cmd)
+            await refresh()
+        }
+    }
+
+    func setEventMode(_ id: String, _ m: CalMode) {
+        eventModes[id] = m  // optimistic
+        let cmd = "meet42 modes set event \(calShellQuote(id)) \(m.rawValue)"
+        Task {
+            _ = try? await services.shell.run(command: cmd)
+            await refresh()
+        }
+    }
+
+    // MARK: Grouping / derived
+
+    /// Calendars represented in the current events, paired with their mode —
+    /// derived locally (the CLI has no calendar-choices verb).
+    var calendarChoices: [CalChoice] {
+        var map: [String: (title: String, source: CalEvent.Source, count: Int)] = [:]
+        for e in events {
+            var entry = map[e.calendarId] ?? (e.calendarTitle ?? e.calendarId, e.source, 0)
+            entry.count += 1
+            if entry.title.isEmpty, let t = e.calendarTitle, !t.isEmpty { entry.title = t }
+            map[e.calendarId] = entry
+        }
+        return map
+            .map { CalChoice(calendarId: $0.key, title: $0.value.title,
+                             source: $0.value.source,
+                             mode: calendarModes[$0.key] ?? .viewOnly,
+                             typeId: calendarTypes[$0.key],
+                             eventCount: $0.value.count) }
+            .sorted { $0.title < $1.title }
+    }
+
+    func eventsByDay() -> [(day: Date, items: [CalEvent])] {
+        let cal = Calendar.current
+        var buckets: [Date: [CalEvent]] = [:]
+        for item in events {
+            let day = cal.startOfDay(for: item.startsAt)
+            buckets[day, default: []].append(item)
+        }
+        return buckets.map { (day: $0.key, items: $0.value) }.sorted { $0.day < $1.day }
+    }
+}
+
+/// A calendar + its mode for the settings popover (derived locally).
+struct CalChoice: Identifiable, Equatable {
+    let calendarId: String
+    var title: String
+    let source: CalEvent.Source
+    var mode: CalMode
+    /// The session type this calendar's events start; nil = `event`.
+    var typeId: String?
+    var eventCount: Int
+    var id: String { calendarId }
+}
+
+// MARK: - EventVisual
+
+enum EventVisual {
+    /// Mode-driven palette (mirrors the app's EventVisual.tint):
+    ///   .assisted → brand violet, .viewOnly → calm blue, .aiScheduled → orange.
+    static func tint(for mode: CalMode) -> Color {
+        switch mode {
+        case .assisted:    return DT.magentaMid
+        case .viewOnly:    return Color(red: 0.20, green: 0.55, blue: 0.92)
+        case .aiScheduled: return DT.orange
+        }
+    }
+
+    static func timeRange(_ e: CalEvent) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "h:mma"
+        f.amSymbol = "AM"
+        f.pmSymbol = "PM"
+        return "\(f.string(from: e.startsAt))–\(f.string(from: e.endsAt))"
+    }
+}
+
+// MARK: - Timeline primitives
+
+enum Timeline {
+    static let pixelsPerHour: CGFloat = 56
+    static let hourRailWidth: CGFloat = 56
+    static let dayHours: Int = 24
+    static var dayHeight: CGFloat { CGFloat(dayHours) * pixelsPerHour }
+
+    static func offset(of date: Date, in dayStart: Date) -> CGFloat {
+        let hours = date.timeIntervalSince(dayStart) / 3600.0
+        return max(0, min(CGFloat(hours), CGFloat(dayHours))) * pixelsPerHour
+    }
+
+    struct Lane: Equatable {
+        let column: Int
+        let totalColumns: Int
+    }
+
+    static func resolveCollisions(_ events: [CalEvent]) -> [(item: CalEvent, lane: Lane)] {
+        let sorted = events.sorted { $0.startsAt < $1.startsAt }
+        var output: [(item: CalEvent, lane: Lane)] = []
+        var cluster: [(item: CalEvent, column: Int)] = []
+        var clusterMaxEnd: Date?
+
+        func flush() {
+            guard !cluster.isEmpty else { return }
+            let total = (cluster.map { $0.column }.max() ?? 0) + 1
+            for c in cluster {
+                output.append((item: c.item, lane: Lane(column: c.column, totalColumns: total)))
+            }
+            cluster.removeAll()
+            clusterMaxEnd = nil
+        }
+
+        for event in sorted {
+            if let maxEnd = clusterMaxEnd, event.startsAt >= maxEnd { flush() }
+            let occupied = Set(cluster.filter { $0.item.endsAt > event.startsAt }.map { $0.column })
+            var col = 0
+            while occupied.contains(col) { col += 1 }
+            cluster.append((event, col))
+            clusterMaxEnd = max(clusterMaxEnd ?? event.endsAt, event.endsAt)
+        }
+        flush()
+        return output
+    }
+}
+
+struct HourRail: View {
+    let currentTime: Date?
+    let dayStart: Date
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                ForEach(0..<24) { hour in
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        Text(hourLabel(hour))
+                            .font(.system(size: DT.f10, weight: .medium))
+                            .foregroundStyle(DT.textTertiary)
+                            .padding(.trailing, 6)
+                            .offset(y: -7)
+                    }
+                    .frame(height: Timeline.pixelsPerHour, alignment: .top)
+                }
+            }
+            if let now = currentTime {
+                let y = Timeline.offset(of: now, in: dayStart)
+                Text(timeLabel(now))
+                    .font(.system(size: DT.f10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule(style: .continuous).fill(Color.red))
+                    .offset(x: 6, y: y - 9)
+            }
+        }
+        .frame(width: Timeline.hourRailWidth, height: Timeline.dayHeight, alignment: .topLeading)
+    }
+
+    private func hourLabel(_ hour: Int) -> String {
+        switch hour {
+        case 0: return "12 AM"
+        case 12: return "Noon"
+        default:
+            let h = hour > 12 ? hour - 12 : hour
+            return "\(h) \(hour < 12 ? "AM" : "PM")"
+        }
+    }
+
+    private func timeLabel(_ d: Date) -> String {
+        let f = DateFormatter(); f.dateFormat = "h:mm"; return f.string(from: d)
+    }
+}
+
+struct AllDayBlock: View {
+    let item: CalEvent
+    let mode: CalMode
+    let coordinateSpaceName: String
+    let onTap: (CalEvent, CGPoint) -> Void
+
+    private var tint: Color { EventVisual.tint(for: mode) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Rectangle().fill(tint.opacity(0.8)).frame(width: 3)
+            Text(item.title.isEmpty ? "(Untitled)" : item.title)
+                .font(.system(size: DT.f11, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(RoundedRectangle(cornerRadius: 3, style: .continuous).fill(tint.opacity(0.18)))
+        .contentShape(Rectangle())
+        .onTapGesture(coordinateSpace: .named(coordinateSpaceName)) { loc in onTap(item, loc) }
+    }
+}
+
+/// Calendar-only event block (work-block + AI-routine variants dropped).
+/// TODO(meet42): work-blocks/AI-schedules re-added via a separate collection.
+struct EventBlock: View {
+    let item: CalEvent
+    let mode: CalMode
+    let dayStart: Date
+    let lane: Timeline.Lane
+    let coordinateSpaceName: String
+    let onTap: (CalEvent, CGPoint) -> Void
+
+    private var tint: Color { EventVisual.tint(for: mode) }
+    private var startOffset: CGFloat { Timeline.offset(of: item.startsAt, in: dayStart) }
+    private var height: CGFloat {
+        max(Timeline.offset(of: item.endsAt, in: dayStart) - startOffset, 18)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: startOffset)
+            HStack(spacing: 1) {
+                if lane.column > 0 {
+                    ForEach(0..<lane.column, id: \.self) { _ in
+                        Color.clear.frame(maxWidth: .infinity)
+                    }
+                }
+                blockContent
+                    .frame(maxWidth: .infinity)
+                    .onTapGesture(coordinateSpace: .named(coordinateSpaceName)) { loc in onTap(item, loc) }
+                let trailing = lane.totalColumns - lane.column - 1
+                if trailing > 0 {
+                    ForEach(0..<trailing, id: \.self) { _ in
+                        Color.clear.frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .frame(height: max(18, height))
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var blockContent: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Rectangle().fill(tint).frame(width: 3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title.isEmpty ? "(Untitled)" : item.title)
+                    .font(.system(size: DT.f11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                if height > 32 {
+                    Text(EventVisual.timeRange(item))
+                        .font(.system(size: DT.f9))
+                        .foregroundStyle(DT.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 5)
+            .padding(.top, 2)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(tint.opacity(0.16)))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .contentShape(Rectangle())
+    }
+}
+
+struct HourGridlines: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<24) { _ in
+                Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
+                Spacer(minLength: 0).frame(height: Timeline.pixelsPerHour - 1)
+            }
+        }
+        .frame(height: Timeline.dayHeight, alignment: .topLeading)
+        .allowsHitTesting(false)
+    }
+}
+
+struct CurrentTimeLine: View {
+    let dayStart: Date
+    let now: Date
+    var body: some View {
+        Rectangle()
+            .fill(Color.red)
+            .frame(height: 1)
+            .offset(y: Timeline.offset(of: now, in: dayStart))
+            .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Day timeline
+
+struct DayTimelineView: View {
+    let referenceDate: Date
+    let events: [CalEvent]
+    let modeFor: (CalEvent) -> CalMode
+    let onEnableAssistance: (CalEvent) -> Void
+
+    @State private var clickedEvent: CalEvent?
+    @State private var clickPoint: CGPoint?
+
+    private let coordSpace = "day-timeline"
+    private var dayStart: Date { Calendar.current.startOfDay(for: referenceDate) }
+    private var allDay: [CalEvent] { events.filter { $0.allDay } }
+    private var timed: [CalEvent] { events.filter { !$0.allDay } }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            allDayStrip
+            DT.systemAccent.opacity(0.15).frame(height: 1)
+            ScrollView(.vertical, showsIndicators: true) {
+                HStack(alignment: .top, spacing: 0) {
+                    TimelineView(.periodic(from: Date(), by: 60)) { context in
+                        HourRail(
+                            currentTime: Calendar.current.isDateInToday(referenceDate) ? context.date : nil,
+                            dayStart: dayStart
+                        )
+                    }
+                    ZStack(alignment: .topLeading) {
+                        HourGridlines()
+                        ForEach(Timeline.resolveCollisions(timed), id: \.item.id) { entry in
+                            EventBlock(
+                                item: entry.item,
+                                mode: modeFor(entry.item),
+                                dayStart: dayStart,
+                                lane: entry.lane,
+                                coordinateSpaceName: coordSpace,
+                                onTap: handleTap
+                            )
+                        }
+                        if Calendar.current.isDateInToday(referenceDate) {
+                            TimelineView(.periodic(from: Date(), by: 60)) { context in
+                                CurrentTimeLine(dayStart: dayStart, now: context.date)
+                            }
+                        }
+                        clickPopoverAnchor
+                    }
+                    .frame(height: Timeline.dayHeight, alignment: .topLeading)
+                    .coordinateSpace(name: coordSpace)
+                }
+                .padding(.bottom, DT.s24)
+            }
+        }
+    }
+
+    private var allDayStrip: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Text("all-day")
+                .font(.system(size: DT.f9, weight: .medium))
+                .foregroundStyle(DT.textTertiary)
+                .frame(width: Timeline.hourRailWidth - 6, alignment: .trailing)
+                .padding(.trailing, 6)
+                .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(allDay) { item in
+                    AllDayBlock(item: item, mode: modeFor(item),
+                                coordinateSpaceName: coordSpace, onTap: handleTap)
+                }
+            }
+            .padding(.top, allDay.isEmpty ? 0 : 4)
+            .padding(.bottom, allDay.isEmpty ? 0 : 4)
+            .padding(.trailing, DT.s12)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .background(Color.primary.opacity(0.025))
+    }
+
+    @ViewBuilder
+    private var clickPopoverAnchor: some View {
+        if let p = clickPoint {
+            ClickAnchor(
+                point: p,
+                clickedEvent: $clickedEvent,
+                modeFor: modeFor,
+                onClear: { clickedEvent = nil; clickPoint = nil },
+                onEnableAssistance: onEnableAssistance
+            )
+        }
+    }
+
+    private func handleTap(_ item: CalEvent, _ point: CGPoint) {
+        clickedEvent = item
+        clickPoint = point
+    }
+}
+
+// MARK: - Week timeline
+
+struct WeekTimeline: View {
+    let referenceDate: Date
+    let events: [CalEvent]
+    let modeFor: (CalEvent) -> CalMode
+    let onEnableAssistance: (CalEvent) -> Void
+
+    @State private var clickedEvent: CalEvent?
+    @State private var clickPoint: CGPoint?
+
+    private let coordSpace = "week-timeline"
+
+    private var days: [Date] {
+        let cal = Calendar.current
+        let start = CLICalendarStore.startOfWeek(referenceDate)
+        return (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: start) }
+    }
+
+    private func eventsFor(day: Date) -> [CalEvent] {
+        let cal = Calendar.current
+        return events.filter { cal.isDate($0.startsAt, inSameDayAs: day) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            weekDaysHeader
+            DT.systemAccent.opacity(0.15).frame(height: 1)
+            allDayRow
+            DT.systemAccent.opacity(0.15).frame(height: 1)
+            ScrollView(.vertical, showsIndicators: true) {
+                HStack(alignment: .top, spacing: 0) {
+                    TimelineView(.periodic(from: Date(), by: 60)) { context in
+                        HourRail(
+                            currentTime: nowIfThisWeek(at: context.date),
+                            dayStart: Calendar.current.startOfDay(for: context.date)
+                        )
+                    }
+                    ZStack(alignment: .topLeading) {
+                        HourGridlines()
+                        HStack(spacing: 0) {
+                            ForEach(days, id: \.self) { day in
+                                DayColumn(
+                                    day: day,
+                                    items: eventsFor(day: day).filter { !$0.allDay },
+                                    modeFor: modeFor,
+                                    coordinateSpaceName: coordSpace,
+                                    onTap: handleTap
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                        TimelineView(.periodic(from: Date(), by: 60)) { context in
+                            if let now = nowIfThisWeek(at: context.date) {
+                                CurrentTimeLine(dayStart: Calendar.current.startOfDay(for: now), now: now)
+                            }
+                        }
+                        clickPopoverAnchor
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .frame(height: Timeline.dayHeight, alignment: .topLeading)
+                    .coordinateSpace(name: coordSpace)
+                }
+                .padding(.bottom, DT.s24)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var clickPopoverAnchor: some View {
+        if let p = clickPoint {
+            ClickAnchor(
+                point: p,
+                clickedEvent: $clickedEvent,
+                modeFor: modeFor,
+                onClear: { clickedEvent = nil; clickPoint = nil },
+                onEnableAssistance: onEnableAssistance
+            )
+        }
+    }
+
+    private func handleTap(_ item: CalEvent, _ point: CGPoint) {
+        clickedEvent = item
+        clickPoint = point
+    }
+
+    private var weekDaysHeader: some View {
+        HStack(spacing: 0) {
+            Spacer().frame(width: Timeline.hourRailWidth)
+            ForEach(days, id: \.self) { day in
+                weekDayCell(day).frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.top, DT.s12)
+        .padding(.bottom, DT.s8)
+    }
+
+    private func weekDayCell(_ day: Date) -> some View {
+        let cal = Calendar.current
+        let isToday = cal.isDateInToday(day)
+        let weekdayFmt = DateFormatter(); weekdayFmt.dateFormat = "EEE"
+        let dayFmt = DateFormatter(); dayFmt.dateFormat = "d"
+        return HStack(spacing: 6) {
+            Text(weekdayFmt.string(from: day))
+                .font(.system(size: DT.f10, weight: .medium))
+                .foregroundStyle(isToday ? Color.white : DT.textSecondary)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule(style: .continuous).fill(isToday ? DT.systemAccent : Color.clear))
+            Text(dayFmt.string(from: day))
+                .font(.system(size: DT.f13, weight: .semibold))
+                .foregroundStyle(isToday ? DT.systemAccent : .primary)
+        }
+    }
+
+    private var allDayRow: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Text("all-day")
+                .font(.system(size: DT.f9, weight: .medium))
+                .foregroundStyle(DT.textTertiary)
+                .frame(width: Timeline.hourRailWidth - 6, alignment: .trailing)
+                .padding(.trailing, 6).padding(.top, 8)
+            HStack(spacing: 0) {
+                ForEach(days, id: \.self) { day in
+                    let allDay = eventsFor(day: day).filter { $0.allDay }
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(allDay) { item in
+                            AllDayBlock(item: item, mode: modeFor(item),
+                                        coordinateSpaceName: coordSpace, onTap: handleTap)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, 2)
+                    .padding(.top, allDay.isEmpty ? 0 : 4)
+                    .padding(.bottom, allDay.isEmpty ? 0 : 4)
+                }
+            }
+        }
+        .background(Color.primary.opacity(0.025))
+    }
+
+    private func nowIfThisWeek(at now: Date = Date()) -> Date? {
+        let cal = Calendar.current
+        let start = CLICalendarStore.startOfWeek(referenceDate)
+        guard let end = cal.date(byAdding: .day, value: 7, to: start) else { return nil }
+        return (now >= start && now < end) ? now : nil
+    }
+}
+
+private struct DayColumn: View {
+    let day: Date
+    let items: [CalEvent]
+    let modeFor: (CalEvent) -> CalMode
+    let coordinateSpaceName: String
+    let onTap: (CalEvent, CGPoint) -> Void
+
+    private var dayStart: Date { Calendar.current.startOfDay(for: day) }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Rectangle()
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                .frame(maxWidth: .infinity)
+                .frame(height: Timeline.dayHeight)
+            ForEach(Timeline.resolveCollisions(items), id: \.item.id) { entry in
+                EventBlock(
+                    item: entry.item,
+                    mode: modeFor(entry.item),
+                    dayStart: dayStart,
+                    lane: entry.lane,
+                    coordinateSpaceName: coordinateSpaceName,
+                    onTap: onTap
+                )
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: Timeline.dayHeight, alignment: .topLeading)
+    }
+}
+
+// MARK: - Agenda list (condensed calendar-event port)
+
+struct AgendaList: View {
+    let groups: [(day: Date, items: [CalEvent])]
+    let modeFor: (CalEvent) -> CalMode
+    let onEnableAssistance: (CalEvent) -> Void
+
+    @State private var clickedEvent: CalEvent?
+    @State private var clickPoint: CGPoint?
+
+    private let coordSpace = "agenda"
+
+    var body: some View {
+        ScrollView {
+            ZStack(alignment: .topLeading) {
+                LazyVStack(alignment: .leading, spacing: DT.s20, pinnedViews: .sectionHeaders) {
+                    ForEach(groups, id: \.day) { group in
+                        Section {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(group.items) { item in
+                                    AgendaRow(item: item, mode: modeFor(item),
+                                              coordinateSpaceName: coordSpace, onTap: handleTap)
+                                }
+                            }
+                            .padding(.horizontal, DT.s24)
+                        } header: {
+                            dayHeader(group.day)
+                        }
+                    }
+                }
+                .padding(.top, DT.s20)
+                .padding(.bottom, DT.s32)
+                if let p = clickPoint {
+                    ClickAnchor(
+                        point: p,
+                        clickedEvent: $clickedEvent,
+                        modeFor: modeFor,
+                        onClear: { clickedEvent = nil; clickPoint = nil },
+                        onEnableAssistance: onEnableAssistance
+                    )
+                }
+            }
+            .coordinateSpace(name: coordSpace)
+        }
+    }
+
+    private func handleTap(_ item: CalEvent, _ point: CGPoint) {
+        clickedEvent = item
+        clickPoint = point
+    }
+
+    private func dayHeader(_ day: Date) -> some View {
+        let cal = Calendar.current
+        let f = DateFormatter()
+        f.dateFormat = cal.isDateInToday(day) ? "'Today' · EEEE, MMM d" : "EEEE, MMM d"
+        return Text(f.string(from: day))
+            .font(.system(size: DT.f12, weight: .semibold))
+            .foregroundStyle(cal.isDateInToday(day) ? DT.systemAccent : DT.textSecondary)
+            .padding(.horizontal, DT.s24)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(DT.backdrop.opacity(0.92))
+    }
+}
+
+private struct AgendaRow: View {
+    let item: CalEvent
+    let mode: CalMode
+    let coordinateSpaceName: String
+    let onTap: (CalEvent, CGPoint) -> Void
+
+    private var tint: Color { EventVisual.tint(for: mode) }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: DT.s12) {
+            VStack(alignment: .trailing, spacing: 1) {
+                if item.allDay {
+                    Text("all-day").font(.system(size: DT.f9, weight: .medium))
+                        .foregroundStyle(DT.textTertiary)
+                } else {
+                    Text(timeLabel(item.startsAt)).font(.system(size: DT.f11, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text(timeLabel(item.endsAt)).font(.system(size: DT.f9))
+                        .foregroundStyle(DT.textTertiary)
+                }
+            }
+            .frame(width: 58, alignment: .trailing)
+            RoundedRectangle(cornerRadius: 2).fill(tint).frame(width: 3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title.isEmpty ? "(Untitled)" : item.title)
+                    .font(.system(size: DT.f13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                if let cal = item.calendarTitle, !cal.isEmpty {
+                    Text(cal).font(.system(size: DT.f10))
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onTapGesture(coordinateSpace: .named(coordinateSpaceName)) { loc in onTap(item, loc) }
+    }
+
+    private func timeLabel(_ d: Date) -> String {
+        let f = DateFormatter(); f.dateFormat = "h:mm a"; return f.string(from: d)
+    }
+}
+
+// MARK: - Click-anchored popover host
+
+struct ClickAnchor: View {
+    let point: CGPoint
+    @Binding var clickedEvent: CalEvent?
+    let modeFor: (CalEvent) -> CalMode
+    let onClear: () -> Void
+    let onEnableAssistance: (CalEvent) -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .popover(
+                isPresented: Binding(
+                    get: { clickedEvent != nil },
+                    set: { if !$0 { onClear() } }
+                ),
+                attachmentAnchor: .point(.center)
+            ) {
+                if let e = clickedEvent {
+                    EventDetailPopover(
+                        item: e,
+                        mode: modeFor(e),
+                        onEnableAssistance: { onEnableAssistance(e) },
+                        onDismiss: onClear
+                    )
+                }
+            }
+            .allowsHitTesting(false)
+            .position(x: point.x, y: point.y)
+    }
+}
+
+// MARK: - Popover content (calendar-event + per-event assist picker)
+
+/// The measured height of the popup's content, so its scroll area can be as tall as the content needs.
+private struct CalPopupContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// Loads one event in full for the popup; set by `CalendarRootView` from the store's services.
+private struct CalEventLoaderKey: EnvironmentKey {
+    static let defaultValue: @MainActor (String) async -> MeetEventState = { _ in .unlinked }
+}
+
+/// Creates an event's session in the foreground through the app's `session.open` intent ("Create session now").
+private struct CalSessionCreateKey: EnvironmentKey {
+    static let defaultValue: @MainActor (_ eventId: String, _ title: String) async throws -> Void = { _, _ in }
+}
+
+/// Cancels the automatic session entry of an event (used after "Create session now").
+private struct CalSessionCancelKey: EnvironmentKey {
+    static let defaultValue: @MainActor (String) async -> Void = { _ in }
+}
+
+/// What the event popup needs to offer a per-event session type: the choices, the event's own override, what it would
+/// otherwise follow, and the setter. Set by `CalendarRootView` from the store.
+struct CalTypePicker {
+    var choices: [CalTypeChoice] = []
+    /// The event's own override; nil follows its calendar.
+    var selection: @MainActor (_ eventId: String) -> String? = { _ in nil }
+    /// The name of the type the event follows when it has no override (its calendar's default, else Event).
+    var defaultName: @MainActor (_ calendarId: String) -> String = { _ in "Event" }
+    var set: @MainActor (_ eventId: String, _ typeId: String?) -> Void = { _, _ in }
+}
+
+private struct CalTypePickerKey: EnvironmentKey {
+    static let defaultValue = CalTypePicker()
+}
+
+extension EnvironmentValues {
+    fileprivate var calTypePicker: CalTypePicker {
+        get { self[CalTypePickerKey.self] }
+        set { self[CalTypePickerKey.self] = newValue }
+    }
+    fileprivate var calEventLoader: @MainActor (String) async -> MeetEventState {
+        get { self[CalEventLoaderKey.self] }
+        set { self[CalEventLoaderKey.self] = newValue }
+    }
+    fileprivate var calSessionCreate: @MainActor (_ eventId: String, _ title: String) async throws -> Void {
+        get { self[CalSessionCreateKey.self] }
+        set { self[CalSessionCreateKey.self] = newValue }
+    }
+    fileprivate var calSessionCancel: @MainActor (String) async -> Void {
+        get { self[CalSessionCancelKey.self] }
+        set { self[CalSessionCancelKey.self] = newValue }
+    }
+}
+
+/// The event popup: the Event details look, a body that scrolls vertically only, and a pinned button row
+/// (Join meeting + one AI control). Loads the full event through `meet42 show`; until it arrives it draws the
+/// event already in the calendar view.
+struct EventDetailPopover: View {
+    let item: CalEvent
+    let mode: CalMode
+    let onEnableAssistance: () -> Void
+    let onDismiss: () -> Void
+
+    @Environment(\.calEventLoader) private var loadEvent
+    @Environment(\.calSessionCreate) private var createEventSession
+    @Environment(\.calSessionCancel) private var cancelScheduled
+    @Environment(\.calTypePicker) private var typePicker
+
+    @State private var event: MeetEvent?
+    @State private var contentHeight: CGFloat = 0
+    @State private var sessionId: String?
+    @State private var creating = false
+    @State private var createError: String?
+
+    private var accent: Color { color(hex: event?.calendarColor) ?? EventVisual.tint(for: mode) }
+    private var link: String? { event?.meetingURL ?? item.meetingURL ?? item.url }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // A ScrollView in a popover collapses to a small default height, so a plain maxHeight never made it
+            // taller. Measure the content and size the scroll area to it, up to 640 points.
+            ScrollView(.vertical, showsIndicators: true) {
+                content
+                    .padding(DT.s16)
+                    .frame(width: 440, alignment: .leading)
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(key: CalPopupContentHeightKey.self, value: proxy.size.height)
+                    })
+            }
+            .onPreferenceChange(CalPopupContentHeightKey.self) { contentHeight = $0 }
+            .frame(height: min(max(contentHeight, 240), 640))
+            Divider().opacity(0.5)
+            buttonRow
+        }
+        .frame(width: 440)
+        .task(id: item.id) {
+            sessionId = item.sessionId
+            if case .loaded(let loaded) = await loadEvent(item.id) {
+                event = loaded
+                if loaded.sessionId != nil { sessionId = loaded.sessionId }
+            }
+        }
+    }
+
+    // MARK: Body
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: DT.s12) {
+            header
+            if let link, let url = URL(string: link), let provider = MeetProvider.detect(link) { meetingCard(url, provider) }
+            if let location = (event?.location ?? item.location)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !location.isEmpty, location != link { locationCard(location) }
+            if !attendees.isEmpty { guestsCard }
+            if let html = descriptionHTML { descriptionCard(html) }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: DT.s12) {
+            RoundedRectangle(cornerRadius: 2).fill(accent).frame(width: 4)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    chip("\(MeetProvider.sourceName(event?.source ?? item.source.rawValue))\((event?.calendarTitle ?? item.calendarTitle).map { " \u{00B7} \($0)" } ?? "")", tint: nil)
+                    if let status = statusChip { chip(status.text, tint: status.tint) }
+                }
+                Text(item.title.isEmpty ? "(Untitled)" : item.title)
+                    .font(.system(size: 19, weight: .bold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                HStack(spacing: DT.s8) {
+                    Image(systemName: "clock").font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                    Text(timeText).font(.system(size: DT.f12)).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var statusChip: (text: String, tint: Color)? {
+        switch event?.status ?? item.status.rawValue {
+        case "confirmed": return ("Confirmed", DT.green)
+        case "tentative": return ("Tentative", DT.amber)
+        case "canceled": return ("Canceled", DT.red)
+        default: return nil
+        }
+    }
+
+    private var timeText: String {
+        let day = DateFormatter()
+        day.dateFormat = "EEE, MMM d"
+        if item.allDay { return "\(day.string(from: item.startsAt)) \u{00B7} All day" }
+        let start = DateFormatter()
+        start.dateFormat = "h:mm"
+        let end = DateFormatter()
+        end.dateFormat = "h:mm a"
+        return "\(day.string(from: item.startsAt)) \u{00B7} \(start.string(from: item.startsAt)) \u{2013} \(end.string(from: item.endsAt))"
+    }
+
+    private func meetingCard(_ url: URL, _ provider: MeetProvider) -> some View {
+        card {
+            HStack(spacing: DT.s12) {
+                Image(systemName: "video.fill").foregroundStyle(provider.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(provider.name).font(.system(size: DT.f12, weight: .semibold))
+                    Text(url.absoluteString.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""))
+                        .font(.system(size: DT.f11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    SystemWidgetPlatformService().copy(url.absoluteString)
+                } label: { Image(systemName: "doc.on.doc") }
+                    .glassIconButton()
+                    .help("Copy link")
+            }
+        }
+    }
+
+    private func locationCard(_ location: String) -> some View {
+        card {
+            HStack(spacing: DT.s12) {
+                Image(systemName: "mappin.and.ellipse").foregroundStyle(.secondary)
+                Text(location).font(.system(size: DT.f12)).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    // MARK: Guests
+
+    /// The attendees as the shared model (replies grouped, names falling back to the email).
+    private var attendees: [MeetEvent.Attendee] { event?.attendees ?? [] }
+
+    private var guestsCard: some View {
+        let e = event
+        return card {
+            VStack(alignment: .leading, spacing: DT.s8) {
+                HStack {
+                    HStack(spacing: -7) {
+                        ForEach(Array(attendees.prefix(4).enumerated()), id: \.offset) { _, a in
+                            MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 24, stacked: true)
+                        }
+                    }
+                    Text("\(attendees.count) \(attendees.count == 1 ? "person" : "people")")
+                        .font(.system(size: DT.f12, weight: .semibold)).padding(.leading, DT.s8)
+                    Spacer(minLength: 0)
+                    if let e {
+                        Text("\(e.count(.going)) going \u{00B7} \(e.count(.maybe) + e.count(.noReply)) open")
+                            .font(.system(size: DT.f11)).foregroundStyle(.secondary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(attendees.prefix(8).enumerated()), id: \.offset) { _, a in
+                        HStack(spacing: DT.s8) {
+                            MeetAvatarView(initials: MeetAvatar.initials(name: a.name, email: a.email),
+                                           key: MeetAvatar.key(name: a.name, email: a.email), size: 22)
+                            Text(a.displayName).font(.system(size: DT.f11)).lineLimit(1).truncationMode(.middle)
+                            if a.isOrganizer { smallChip("Organizer", tint: DT.systemAccent) }
+                            if a.isCurrentUser { smallChip("You", tint: nil) }
+                            Spacer(minLength: 0)
+                            Image(systemName: MeetRSVP(status: a.status).symbol).foregroundStyle(MeetRSVP(status: a.status).color)
+                        }
+                    }
+                    if attendees.count > 8 {
+                        Text("+\(attendees.count - 8) more").font(.system(size: DT.f10)).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Description
+
+    /// The sanitised notes with Google's `-::~:~::~` divider lines removed; nil when nothing is left.
+    private var descriptionHTML: String? {
+        let raw = event?.notesHTML ?? CalNotes.html(from: item.notes)
+        guard let raw else { return nil }
+        let cleaned = CalNotes.stripDividers(raw)
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : cleaned
+    }
+
+    private func descriptionCard(_ html: String) -> some View {
+        card {
+            VStack(alignment: .leading, spacing: DT.s8) {
+                Label("Description", systemImage: "doc.text")
+                    .font(.system(size: DT.f11, weight: .semibold)).foregroundStyle(.secondary)
+                MarkdownPreview(text: html, autoHeight: true)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    // MARK: Button row (pinned)
+
+    private var buttonRow: some View {
+        VStack(alignment: .leading, spacing: DT.s8) {
+            HStack(spacing: DT.s8) {
+                if let link, let url = URL(string: link) {
+                    Button {
+                        SystemWidgetPlatformService().open(url)
+                    } label: {
+                        Label("Join meeting", systemImage: "video.fill").lineLimit(1).fixedSize()
+                    }
+                    .glassProminentCapsule(tint: MeetProvider.detect(link)?.brandHex.flatMap { color(hex: $0) } ?? DT.systemAccent)
+                    .help(link)
+                }
+                Spacer(minLength: 0)
+                aiControl
+            }
+            if let caption = aiCaption {
+                Text(caption).font(.system(size: DT.f11)).foregroundStyle(.secondary)
+            }
+            if mode == .assisted, sessionId == nil { sessionTypeRow }
+            if let createError {
+                Text(createError).font(.system(size: DT.f11)).foregroundStyle(DT.red)
+            }
+        }
+        .padding(.horizontal, DT.s12)
+        .padding(.vertical, DT.s12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+    }
+
+    /// The session type this event starts, overriding its calendar's. Only before the session exists: after that the type is fixed.
+    private var sessionTypeRow: some View {
+        HStack(spacing: DT.s8) {
+            Text("Session type").font(.system(size: DT.f11)).foregroundStyle(.secondary)
+            CalTypeMenu(
+                typeChoices: typePicker.choices, selection: typePicker.selection(item.id),
+                defaultLabel: typePicker.defaultName(item.calendarId),
+                onSelect: { typePicker.set(item.id, $0) })
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Under the buttons: when the automatic session will be created, for an AI-assisted event without one yet.
+    private var aiCaption: String? {
+        mode == .assisted && sessionId == nil ? "A session is created automatically at \(autoTime)." : nil
+    }
+
+    @ViewBuilder
+    private var aiControl: some View {
+        switch mode {
+        case .assisted:
+            if let sessionId {
+                Button {
+                    if let url = URL(string: "work42://session/\(sessionId)") { SystemWidgetPlatformService().open(url) }
+                } label: {
+                    Label("Open session in Work42", systemImage: "arrow.up.forward.app").lineLimit(1).fixedSize()
+                }
+                .glassProminentCapsule(tint: DT.systemAccent)
+            } else {
+                Button {
+                    Task { await createSession() }
+                } label: {
+                    Label("Create session now", systemImage: "sparkles").lineLimit(1).fixedSize()
+                }
+                .glassProminentCapsule(tint: DT.systemAccent)
+                .disabled(creating)
+            }
+        case .viewOnly:
+            Button(action: onEnableAssistance) {
+                Label("Enable AI assistance", systemImage: "sparkles").lineLimit(1).fixedSize()
+            }
+            .glassPlainCapsule()
+            .help("Opt this single event into AI assistance. The rest of the calendar stays view-only.")
+        case .aiScheduled:
+            EmptyView()
+        }
+    }
+
+    private var autoTime: String {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        return f.string(from: item.startsAt.addingTimeInterval(-15 * 60))
+    }
+
+    /// Creates the event session now in the foreground through the app's `session.open` intent (Work42 shows its
+    /// "Setting up your Session" overlay and opens the session), cancels the scheduled entry so the event doesn't
+    /// get a second session, and reloads so the button becomes "Open session in Work42". The overlay owns progress
+    /// and errors; the button stays disabled while the call runs so a double click can't create two sessions.
+    private func createSession() async {
+        guard !creating else { return }
+        creating = true
+        createError = nil
+        defer { creating = false }
+        do {
+            try await createEventSession(item.id, item.title.isEmpty ? "Meeting" : item.title)
+        } catch {
+            createError = "Couldn\u{2019}t create the session: \(error.localizedDescription)"
+            return
+        }
+        await cancelScheduled(item.id)
+        if case .loaded(let loaded) = await loadEvent(item.id), let linked = loaded.sessionId { sessionId = linked }
+    }
+
+    // MARK: Pieces
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .padding(DT.s12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).fill(DT.chipFill))
+            .overlay(RoundedRectangle(cornerRadius: DT.rCard, style: .continuous).strokeBorder(DT.chipStroke, lineWidth: 0.5))
+    }
+
+    private func chip(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: DT.f10, weight: .semibold))
+            .foregroundStyle(tint ?? .secondary)
+            .lineLimit(1).truncationMode(.middle)
+            .padding(.horizontal, 8).padding(.vertical, 2)
+            .background(Capsule().fill((tint ?? Color.primary).opacity(tint == nil ? 0.06 : 0.14)))
+    }
+
+    private func smallChip(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(tint ?? .secondary)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(Capsule().fill((tint ?? Color.primary).opacity(tint == nil ? 0.07 : 0.14)))
+    }
+
+    private func color(hex: String?) -> Color? {
+        guard var hex, hex.hasPrefix("#") else { return nil }
+        hex.removeFirst()
+        guard hex.count == 6, let value = UInt32(hex, radix: 16) else { return nil }
+        return Color(red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255, blue: Double(value & 0xFF) / 255)
+    }
+}
+
+/// Notes helpers for the popup: plain text before `meet42 show` answers, and Google's divider removal.
+enum CalNotes {
+
+    /// Escaped HTML for plain-text notes (used until the sanitised `notesHTML` arrives).
+    static func html(from notes: String?) -> String? {
+        guard let notes, !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let escaped = notes.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        return escaped.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "<br>")
+    }
+
+    /// Removes runs of 12 or more `-`, `:`, `~` and `=` characters (Google adds `-::~:~::~...` lines around its Meet
+    /// block), together with the line breaks around them.
+    static func stripDividers(_ html: String) -> String {
+        var text = html.replacingOccurrences(of: #"(<br\s*/?>\s*)*[-:~=]{12,}(\s*<br\s*/?>)*"#, with: "<br>", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"^(\s*<br\s*/?>)+"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(<br\s*/?>\s*)+$"#, with: "", options: .regularExpression)
+        return text
+    }
+}
+
+// MARK: - Calendar settings popover (per-calendar assist-mode picker)
+
+struct CalendarSettingsPopover: View {
+    let choices: [CalChoice]
+    let typeChoices: [CalTypeChoice]
+    let setMode: (String, CalMode) -> Void
+    let setType: (String, String?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DT.s12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Calendar AI assistance")
+                    .font(.system(size: DT.f15, weight: .semibold))
+                Text("Choose which calendars the AI should engage with. AI Assisted calendars get sessions and prep; view-only ones stay visible but the agent stays hands-off.")
+                    .font(.system(size: DT.f11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if choices.isEmpty {
+                Text("No calendars yet — wait for the first sync to populate this list.")
+                    .font(.system(size: DT.f11))
+                    .foregroundStyle(DT.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, DT.s12)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(choices) { choice in
+                        CalendarPreferenceRow(choice: choice, typeChoices: typeChoices, setMode: setMode, setType: setType)
+                    }
+                }
+            }
+
+            Divider().opacity(0.4)
+
+            HStack(spacing: DT.s16) {
+                legendChip(label: "AI Assisted", mode: .assisted)
+                legendChip(label: "View only", mode: .viewOnly)
+                legendChip(label: "AI scheduled", mode: .aiScheduled)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(DT.s16)
+        .frame(width: 360)
+    }
+
+    private func legendChip(label: String, mode: CalMode) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(EventVisual.tint(for: mode)).frame(width: 10, height: 10)
+            Text(label).font(.system(size: DT.f10, weight: .medium)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// "Session type" menu: Default (Event) or one of the session types. Shared by a calendar row and an event's popup.
+struct CalTypeMenu: View {
+    let typeChoices: [CalTypeChoice]
+    /// The explicitly chosen type id; nil is the default.
+    let selection: String?
+    /// What nil means here: "Event" for a calendar, "calendar default" for an event.
+    let defaultLabel: String
+    let onSelect: (String?) -> Void
+
+    private var selectedName: String {
+        guard let selection else { return defaultLabel }
+        return typeChoices.first { $0.id == selection }?.name ?? selection
+    }
+
+    var body: some View {
+        Menu {
+            Button { onSelect(nil) } label: {
+                if selection == nil { Label("Default (\(defaultLabel))", systemImage: "checkmark") } else { Text("Default (\(defaultLabel))") }
+            }
+            Divider()
+            ForEach(typeChoices) { type in
+                Button { onSelect(type.id) } label: {
+                    if selection == type.id { Label(type.name, systemImage: "checkmark") } else { Text(type.name) }
+                }
+            }
+        } label: {
+            Text(selectedName).font(.system(size: DT.f10, weight: .medium)).lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("The session type started for these events")
+    }
+}
+
+private struct CalendarPreferenceRow: View {
+    let choice: CalChoice
+    let typeChoices: [CalTypeChoice]
+    let setMode: (String, CalMode) -> Void
+    let setType: (String, String?) -> Void
+
+    private var assisted: Binding<Bool> {
+        Binding(
+            get: { choice.mode == .assisted },
+            set: { newValue in setMode(choice.calendarId, newValue ? .assisted : .viewOnly) }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: DT.s12) {
+            Circle().fill(EventVisual.tint(for: choice.mode)).frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(choice.title)
+                    .font(.system(size: DT.f12, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1).truncationMode(.middle)
+                Text("\(choice.source.rawValue) · \(choice.eventCount) event\(choice.eventCount == 1 ? "" : "s")")
+                    .font(.system(size: DT.f10))
+                    .foregroundStyle(DT.textTertiary)
+            }
+            Spacer(minLength: DT.s8)
+            CalTypeMenu(
+                typeChoices: typeChoices, selection: choice.typeId, defaultLabel: "Event",
+                onSelect: { setType(choice.calendarId, $0) })
+            Toggle("", isOn: assisted)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .tint(DT.magentaMid)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Mic-wake detection (background agent + pill bridge)
+//
+// The calendar widget's background agent is the always-on, session-less mic-wake
+// detector (meet42-detection-rework design): on Home a widget's agent runs
+// independent of any mounted view, so it IS the global pre-session detector —
+// no app bridge needed. It:
+//
+//   (a) Detection — EVENT-DRIVEN, zero polling. Consumes the long-lived
+//       `meet42 watch` child process's line-delimited JSON stdout stream
+//       (CoreAudio property listeners over PER-PROCESS mic INPUT only — never
+//       triggers on audio output). Each `call-open` is handled exactly once
+//       (in-memory `Set<CallId>`, never re-prompts within one call session);
+//       it shells `meet42 now --json`, accepts a matching event only when its
+//       effective mode is assisted AND its linked session resolves, then uses
+//       that session's authoritative name. Every other call is ad-hoc: it
+//       borrows no title, schedule, or event id from a nearby event and chooses
+//       its exact future session name before showing the prompt. It then sets
+//       `CalendarDetectionState.shared.phase = .detected(meeting)`, and
+//       presents the calendar widget's DETECTED pill with the app's native
+//       icon.
+//   (b) Start sequence — RECORD-FIRST (meet42-recording-lifecycle-rework):
+//       Record now / the 10s auto-start fires `meet42 record start`
+//       IMMEDIATELY — session-agnostic, allocates its own recordings dir,
+//       returns within well under 1s. The session comes AFTER, off the
+//       critical path: YES (a calendar event already has one linked, e.g. a
+//       "Prepare for Meeting" session with prep work already in it) attaches
+//       the recording's pointer directly to that existing session, no mint;
+//       NO mints a fresh session with that already-visible name, seeded with
+//       the pointer (`meeting/
+//       recording_dir`) + stable meeting identity at creation. The phase flips
+//       to `.settingUp` while this runs, then `.none` + dismiss this pill + float Recording
+//       RECORDING pill for that session — a widget pill owned by the MEETING
+//       session, never Home's. A failed attempt reverts the phase to
+//       `.detected` with a retry message, and explicitly stops the just-started
+//       recording so a failed mint can never leave an unowned capture.
+//       `call-close` just cancels an undecided Detected prompt; this agent no
+//       longer has active-meeting stop ownership; Recording takes over after
+//       the one-way handoff.
+//   (c) Reconciler — every ~30s reads assisted events (`meet42 modes get --json`
+//       + `meet42 list --json`) and syncs them into work42's generic scheduler
+//       (`schedule_add/schedule_cancel --key mtg:<id>`) at T-15min. Unchanged by
+//       the detection rework.
+//
+// Only ONE agent instance (across every alive session) does this work — see
+// `DetectorLock` — since `WidgetBackgroundHost` starts one instance per
+// (session × widget) and N alive sessions must not mean N independent
+// watchers/prompts/mints for the same mic event.
+//
+// Detected and setup render through the SDK's shared accessory shell, keeping
+// app identity and geometry fixed while the state row and progress rail
+// change. The agent↔pill
+// bridge is `CalendarDetectionState.shared`: the agent WRITES `.phase`;
+// `makePillView` READS it and renders the matching accessory — the host panel
+// re-renders the pill without resizing it between phases.
+// The record decision + 10s auto-start timer live on the agent (so side
+// effects stay agent-owned); the pill just calls back.
+
+/// Meeting-detection accent — the theme accent, like every other notification card.
+var meetingDetectionAccent: Color { DT.systemAccent }
+/// The accent for the on-dark countdown copy.
+var meetingDetectionAccentLight: Color { DT.systemAccent }
+
+private func meetingAppIcon(bundleId: String) -> PlatformImage? {
+    #if os(macOS)
+    guard !bundleId.isEmpty,
+          let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
+    else { return nil }
+    return NSWorkspace.shared.icon(forFile: url.path)
+    #else
+    // An iPad has no copy of the Mac's meeting app to take the icon from.
+    return nil
+    #endif
+}
+
+/// A resolved detection the agent hands to the pill. Carries the display data +
+/// two callbacks the pill invokes (Record now / Skip) so the side effects stay
+/// owned by the agent, not the view.
+@MainActor
+struct DetectedMeeting {
+    /// The existing session's authoritative name, or the exact future name
+    /// chosen for an ad-hoc session before the prompt appears.
+    let sessionName: String
+    /// Source/timing context. Never repeats the session name.
+    let subtitle: String
+    /// The resolved calendar event id, or nil for an ad-hoc call.
+    let eventId: String?
+    /// The id of a session already minted for this event (YES path), else nil (NO).
+    let existingSessionId: String?
+    /// Scheduled bounds when a calendar event matched; nil for ad-hoc calls.
+    let scheduledStart: Date?
+    let scheduledEnd: Date?
+    /// Canonical bundle id of the detected call app (e.g. "us.zoom.xos") —
+    /// resolves the medallion's native app icon via NSWorkspace.
+    let bundleId: String
+    /// Retryable setup error. Nil for the initial detected prompt.
+    let errorMessage: String?
+    /// Moment the 10s auto-start grace began — drives the bar + "Auto-… in Ns".
+    let countdownStart: Date
+    /// Record now / auto-start → run the start sequence (agent-owned).
+    let onRecord: () -> Void
+    /// Skip → clear + dismiss, permanently for this call session (agent-owned).
+    let onSkip: () -> Void
+}
+
+/// The Calendar pill's current phase — mutually exclusive single-pill states
+/// (meet42-detect-pill-rework). The background agent WRITES `phase`; the
+/// calendar widget's `makePillView` READS it to choose the pill's content.
+enum CalendarPillPhase {
+    /// A meeting was detected and the Skip/Record now prompt is showing.
+    case detected(DetectedMeeting)
+    /// Recording started; Calendar is seeding or minting the event session.
+    case settingUp(DetectedMeeting)
+    /// No detection in progress — the pill falls back to the compact
+    /// "next N events" agenda (`CalendarPillView`).
+    case none
+}
+
+/// The agent↔pill bridge. The background agent WRITES `phase`; the calendar
+/// widget's `makePillView` READS it to switch the pill's content.
+@Observable
+@MainActor
+final class CalendarDetectionState {
+    static let shared = CalendarDetectionState()
+    private init() {}
+
+    var phase: CalendarPillPhase = .none
+}
+
+/// Routes the ALREADY-FLOATED calendar pill's content by `phase` — and,
+/// critically, does so from an actual SwiftUI `View.body` rather than a plain
+/// function. `PillHost.present` calls `makePillView` exactly ONCE per
+/// `present()` call and freezes the resulting `AnyView`; `startRecording`
+/// below never calls `present` again, it only mutates
+/// `CalendarDetectionState.shared.phase` and relies on reactive re-render.
+/// Reading an `@Observable` property from a plain function (the old
+/// `makePillView` body) does NOT establish that dependency — only reading it
+/// from a real View's `body` does — so the loader states silently never
+/// appeared; this wrapper is what makes the phase transitions actually live.
+private struct CalendarPillRouter: View {
+    let services: SessionServices
+
+    var body: some View {
+        switch CalendarDetectionState.shared.phase {
+        case .detected(let meeting):
+            DetectedPillView(meeting: meeting, services: services)
+        case .settingUp(let meeting):
+            SettingUpPillView(meeting: meeting)
+        case .none:
+            CalendarPillView(services: services)
+        }
+    }
+}
+
+// MARK: - DetectedPillView (ported "detected" accessory state)
+
+/// Plugin-local port of EventSessionAccessory's `detected` state: medallion +
+/// meeting name/subtitle + "Auto-starting in Ns" countdown + purple bar + Skip /
+/// Record now. Content-only — the host (`PillBirthView`) owns the card surface;
+/// this view must not draw its own background (no AppKit, no Flow42Core).
+struct DetectedPillView: View {
+    let meeting: DetectedMeeting
+    let services: SessionServices
+
+    private let countdownTotal: TimeInterval = 10
+
+    var body: some View {
+        WidgetPillAccessoryShell(
+            title: meeting.sessionName,
+            subtitle: meeting.subtitle,
+            icon: WidgetPillAppIcon(
+                image: meetingAppIcon(bundleId: meeting.bundleId),
+                tint: meetingDetectionAccent
+            ),
+            actionRow: { actionRow },
+            progressRail: { countdownBar }
+        )
+    }
+
+    // MARK: Action row — countdown message + Skip + Record now
+
+    private var actionRow: some View {
+        HStack(spacing: 10) {
+            countdownMessage
+            Spacer(minLength: 8)
+            skipButton
+            recordButton
+        }
+        .frame(height: 32)
+    }
+
+    private var countdownMessage: some View {
+        Group {
+            if let errorMessage = meeting.errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(Color.red.opacity(0.9))
+            } else {
+                TimelineView(.animation) { ctx in
+                    Text("Auto-starting in \(countdownSeconds(at: ctx.date))s")
+                        .foregroundStyle(meetingDetectionAccentLight)
+                }
+            }
+        }
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+    }
+
+    private var skipButton: some View {
+        Button(action: meeting.onSkip) {
+            Text("Skip")
+        }
+        .buttonStyle(WidgetPillActionButtonStyle())
+        .help("Skip auto-start")
+    }
+
+    private var recordButton: some View {
+        Button(action: meeting.onRecord) {
+            HStack(spacing: 6) {
+                Image(systemName: "record.circle")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white)
+                Text(meeting.errorMessage == nil ? "Record now" : "Retry")
+            }
+        }
+        .buttonStyle(WidgetPillActionButtonStyle(emphasis: .primary, tint: meetingDetectionAccent))
+        .help("Start recording now")
+    }
+
+    // MARK: Purple countdown bar (flush bottom)
+
+    private var countdownBar: some View {
+        Group {
+            if meeting.errorMessage == nil {
+                TimelineView(.animation) { ctx in
+                    let frac = countdownFraction(at: ctx.date)
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.white.opacity(0.08))
+                        Rectangle()
+                            .fill(meetingDetectionAccent)
+                            .frame(width: max(0, WidgetPillAccessoryMetrics.width * frac))
+                            .shadow(color: meetingDetectionAccent.opacity(0.7), radius: 4)
+                    }
+                    .frame(height: WidgetPillAccessoryMetrics.progressHeight)
+                }
+            } else {
+                Color.clear
+            }
+        }
+    }
+
+    private func countdownFraction(at date: Date) -> CGFloat {
+        guard countdownTotal > 0 else { return 0 }
+        let remaining = max(0, countdownTotal - date.timeIntervalSince(meeting.countdownStart))
+        return CGFloat(remaining / countdownTotal)
+    }
+
+    private func countdownSeconds(at date: Date) -> Int {
+        let remaining = max(0, countdownTotal - date.timeIntervalSince(meeting.countdownStart))
+        return max(1, Int(ceil(remaining)))
+    }
+}
+
+// MARK: - SettingUpPillView (Calendar pill's second/third state)
+
+/// Shown while Calendar seeds or mints the event session. It preserves the
+/// detected meeting identity and shared shell while the lower row reports
+/// setup progress.
+struct SettingUpPillView: View {
+    let meeting: DetectedMeeting
+    private let helperInterval: TimeInterval = 2.2
+    private static let mintHelpers = [
+        "Minting an isolated worktree",
+        "Carrying over your local files",
+        "Preparing agent skills",
+        "Wiring up the session",
+    ]
+
+    @State private var helperIndex = 0
+
+    var body: some View {
+        WidgetPillAccessoryShell(
+            title: meeting.sessionName,
+            subtitle: meeting.subtitle,
+            icon: WidgetPillAppIcon(
+                image: meetingAppIcon(bundleId: meeting.bundleId),
+                tint: meetingDetectionAccent
+            ),
+            actionRow: {
+                HStack(spacing: 9) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(meetingDetectionAccentLight)
+                    Text(Self.mintHelpers[helperIndex % Self.mintHelpers.count])
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(meetingDetectionAccentLight)
+                        .lineLimit(1)
+                        .contentTransition(.opacity)
+                    Spacer(minLength: 8)
+                    Text("Starting…")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            },
+            progressRail: {
+                Rectangle().fill(meetingDetectionAccent.opacity(0.75))
+            }
+        )
+        .onReceive(Timer.publish(every: helperInterval, on: .main, in: .common).autoconnect()) { _ in
+            withAnimation(.easeInOut(duration: 0.3)) {
+                helperIndex = (helperIndex + 1) % Self.mintHelpers.count
+            }
+        }
+    }
+}
+
+// MARK: - meet42 now --json payload
+
+/// Decode target for `meet42 now --json` — a single `CalendarEvent.Item` (or the
+/// literal `null`). Only the fields the detection flow needs; `sessionId` is the
+/// id of a session already minted for this event (nil → NO/record-to-create path).
+private struct DetectedEventPayload: Decodable {
+    let id: String
+    let calendarId: String
+    let title: String
+    let startsAt: Date
+    let endsAt: Date
+    let source: String?
+    let sessionId: String?
+}
+
+private struct SessionIdentityPayload: Decodable {
+    let id: String
+    let name: String
+}
+
+/// `session_show` → the workspace the session lives in.
+private struct SessionWorkspacePayload: Decodable {
+    let workspaceId: String
+
+    enum CodingKeys: String, CodingKey { case workspaceId = "workspace_id" }
+}
+
+private struct ResolvedAssistedMeeting {
+    let event: DetectedEventPayload
+    let sessionId: String
+    let sessionName: String
+}
+
+// MARK: - DetectorLock
+
+/// Machine-wide lock so only ONE `CalendarDetectionAgent` instance — across
+/// every alive session this widget is active on, and across every app
+/// process — spawns `meet42 watch` and runs the prompt/mint pipeline.
+/// `WidgetBackgroundHost` starts one agent instance per (session × widget);
+/// with N alive sessions that's N independent watchers each prompting/minting
+/// for the same mic event (observed live: two simultaneous `meet42 watch`
+/// processes, two `call-open`s and two `prompt-shown`s ~1ms apart for the
+/// SAME Chrome session).
+///
+/// Uses an OS-level `flock()` rather than a hand-rolled "read the claim file,
+/// check if the pid is alive, then overwrite it" scheme — that read-then-write
+/// shape is NOT atomic: two agents starting within the same instant both read
+/// "free/stale" and both unconditionally win the overwrite (confirmed live —
+/// that race is exactly what produced the duplicate watchers above).
+/// `flock(LOCK_EX | LOCK_NB)` is atomic at the kernel level (no TOCTOU window)
+/// and self-releasing — the lock drops the instant the owning process exits
+/// for ANY reason (clean quit, crash, force-kill), so there is no pid-liveness
+/// bookkeeping to get wrong.
+private enum DetectorLock {
+    private static var path: String {
+        RealHome.meet42Folder.appendingPathComponent("detector.lock").path
+    }
+
+    /// The fd we hold the lock on, once claimed. -1 means not held.
+    nonisolated(unsafe) private static var heldFD: Int32 = -1
+
+    /// Returns true only for the ONE caller that actually wins the lock.
+    /// `heldFD` is process-wide, not per-caller — `WidgetBackgroundHost` runs
+    /// one `CalendarDetectionAgent` instance per (session × widget), all in
+    /// the SAME process (e.g. the Home-level detector + this task session's
+    /// own detector), so a "heldFD >= 0 → return true" fast path (as if that
+    /// meant "I already hold it") actually told EVERY instance in the
+    /// process "you have it" the instant the first one claimed it —
+    /// confirmed live: two `meet42 watch` children spawned from one PID.
+    /// Once held, every other claim() in this process must get false; only
+    /// release() (called by the true owner's stop()) reopens it.
+    static func claim() -> Bool {
+        guard heldFD < 0 else { return false }
+        let dir = (path as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let fd = open(path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return false }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            close(fd)
+            return false
+        }
+        heldFD = fd
+        return true
+    }
+
+    /// Release the lock, if we hold it.
+    static func release() {
+        guard heldFD >= 0 else { return }
+        flock(heldFD, LOCK_UN)
+        close(heldFD)
+        heldFD = -1
+    }
+}
+
+// MARK: - CalendarDetectionAgent
+
+/// The calendar widget's background agent: mic-wake detection + the scheduler
+/// reconciler. One instance per (session × widget) — on Home, that's the single
+/// session-less detector. All side effects go through `services.shell`
+/// (meet42/work42 CLIs), `services.pill`, and `CalendarDetectionState.shared`.
+@Observable
+@MainActor
+final class CalendarDetectionAgent: WidgetBackgroundAgent {
+    var headerLabels: [WidgetHeaderLabel] = []
+
+    @ObservationIgnored private var services: WidgetBackgroundServices?
+    @ObservationIgnored private var watchTask: Task<Void, Never>?
+    @ObservationIgnored private var reconcileTask: Task<Void, Never>?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var syncChangesTask: Task<Void, Never>?
+    @ObservationIgnored private var syncRunning = false
+    @ObservationIgnored private var syncAgain = false
+    @ObservationIgnored private var countdownTask: Task<Void, Never>?
+    /// The "Meeting detected" notification on the pill, while one is showing (`notification_post` / `notification_dismiss`).
+    @ObservationIgnored private var detectedNotificationId: String?
+    @ObservationIgnored private var detectorClaimTask: Task<Void, Never>?
+    /// True once THIS instance owns the machine-wide detector lock (see
+    /// `DetectorLock`) and is therefore the one spawning `meet42 watch` +
+    /// running the reconciler. WidgetBackgroundHost starts one agent instance
+    /// per (session × widget) — with N alive sessions that's N instances; only
+    /// the lock owner does real work, the rest stay idle and periodically
+    /// check whether the owner has died so one of them can take over.
+    @ObservationIgnored private var ownsDetectorLock = false
+
+    /// Calls already handled (prompted, or decided) — a call-open is handled
+    /// exactly once. In-memory only, call-session scoped: a restart treats a
+    /// still-open call as fresh (confirmed acceptable — no cross-restart
+    /// persistence needed).
+    @ObservationIgnored private var handledCalls: Set<String> = []
+    /// Scheduler keys this agent has added, so it can cancel ones that drop out.
+    @ObservationIgnored private var scheduledKeys: Set<String> = []
+
+    // MARK: Lifecycle
+
+    func start(services s: WidgetBackgroundServices) {
+        services = s
+        Task { await Meet42Trace.configure(storage: s.storage) }
+        ownsDetectorLock = DetectorLock.claim()
+        if ownsDetectorLock {
+            beginWatching(s)
+        }
+        // Idle instances (lock not held) re-check every ~15s in case the
+        // owner died without a clean stop() (e.g. the app was killed, not
+        // quit) — flock releases automatically the instant that process
+        // exits, so the very next claim() attempt after that succeeds; the
+        // 15s interval is just how soon an idle instance notices and takes
+        // over, not a staleness timeout.
+        detectorClaimTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard let self, !Task.isCancelled, !self.ownsDetectorLock else { continue }
+                if DetectorLock.claim() {
+                    self.ownsDetectorLock = true
+                    self.beginWatching(s)
+                }
+            }
+        }
+    }
+
+    func stop() {
+        watchTask?.cancel(); watchTask = nil
+        reconcileTask?.cancel(); reconcileTask = nil
+        syncTask?.cancel(); syncTask = nil
+        syncChangesTask?.cancel(); syncChangesTask = nil
+        countdownTask?.cancel(); countdownTask = nil
+        detectorClaimTask?.cancel(); detectorClaimTask = nil
+        if ownsDetectorLock {
+            DetectorLock.release()
+            ownsDetectorLock = false
+        }
+        services = nil
+        handledCalls.removeAll()
+    }
+
+    /// Spawn the watch loop and start the reconciler — only ever called while
+    /// `ownsDetectorLock` is true (initial start, or a later takeover).
+    private func beginWatching(_ s: WidgetBackgroundServices) {
+        spawnWatchLoop(s)
+        beginCalendarSync(s)
+        reconcileTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.reconcileCycle(s)
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+
+    // MARK: Calendar sync (background)
+
+    /// Keeps meet42's own copy of the calendar (`calendar.db`) current, so a new event reaches the Calendar, Event details
+    /// and the brief. Work42 reads the calendars (`services.calendar`, with the Calendar permission it holds for meet42) and
+    /// the events go to `meet42 sync --events`, which writes the database. Runs at start, whenever Work42 reports the
+    /// calendars changed, and every five minutes as a backstop, while this agent owns the detector lock. It only runs once
+    /// Calendar access has been granted, so it never raises a permission prompt from the background; a failed run is
+    /// logged to the trace and retried on the next trigger.
+    private func beginCalendarSync(_ s: WidgetBackgroundServices) {
+        syncTask?.cancel()
+        syncChangesTask?.cancel()
+        // At start, and every five minutes after as a backstop.
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.requestSync(s)
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
+        // And whenever Work42 reports the calendars changed.
+        syncChangesTask = Task { [weak self] in
+            while !Task.isCancelled {
+                for await _ in s.calendar.changes() {
+                    if Task.isCancelled { return }
+                    await self?.requestSync(s)
+                }
+                // The stream ends at once while Calendar access is not granted: look again in a while.
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+
+    /// One sync at a time: a trigger that arrives while one runs asks for one more when it ends, so the last change is never lost.
+    private func requestSync(_ s: WidgetBackgroundServices) async {
+        if syncRunning {
+            syncAgain = true
+            return
+        }
+        syncRunning = true
+        repeat {
+            syncAgain = false
+            await syncCalendarOnce(s)
+        } while syncAgain && !Task.isCancelled
+        syncRunning = false
+    }
+
+    private func syncCalendarOnce(_ s: WidgetBackgroundServices) async {
+        guard (try? await s.permissions.status(.calendars)) == .granted else { return }
+        let now = Date()
+        let from = now.addingTimeInterval(-7 * 24 * 60 * 60), to = now.addingTimeInterval(90 * 24 * 60 * 60)
+        let events: [CalendarEvent]
+        do {
+            events = try await s.calendar.events(from: from, to: to)
+        } catch {
+            Meet42Trace.log("calendar", "sync-failed", ["reason": "calendar", "error": String(describing: error)])
+            return
+        }
+        // The events travel to the command line in a file in meet42's own folder (the extension may write there).
+        let folder = RealHome.meet42Folder
+        let file = folder.appendingPathComponent("sync-events-\(UUID().uuidString).json")
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(events).write(to: file, options: .atomic)
+        } catch {
+            Meet42Trace.log("calendar", "sync-failed", ["reason": "write", "error": String(describing: error)])
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: file) }
+        let iso = ISO8601DateFormatter()
+        let command = "meet42 sync --events \(calShellQuote(file.path)) --from \(calShellQuote(iso.string(from: from)))"
+            + " --to \(calShellQuote(iso.string(from: to))) --json"
+        guard let result = try? await s.shell.run(command: command, timeout: .seconds(60)) else {
+            Meet42Trace.log("calendar", "sync-failed", ["reason": "shell"])
+            return
+        }
+        if result.exitCode == 0 {
+            Meet42Trace.log("calendar", "sync-ok", ["output": String(result.stdout.prefix(120))])
+        } else {
+            Meet42Trace.log("calendar", "sync-failed", ["exit": String(result.exitCode), "stderr": String(result.stderr.prefix(200))])
+        }
+    }
+
+    // MARK: (a) meet42 watch stream — event-driven, zero polling
+
+    /// Keep a long-lived `meet42 watch` child alive for the agent's lifetime,
+    /// respawning (after a brief backoff) if it ever exits unexpectedly.
+    /// Dedup by callId backstops any duplicate re-detection across a respawn.
+    private func spawnWatchLoop(_ s: WidgetBackgroundServices) {
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.runWatchOnce(s)
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    /// Runs `meet42 watch` through Work42's shell (`shell.start`: it never exits on its own, so the bounded `run` would kill it) and
+    /// reads its line-delimited JSON until it dies, then returns so the caller's loop respawns it.
+    private func runWatchOnce(_ s: WidgetBackgroundServices) async {
+        await streamMeet42Lines("meet42 watch", shell: s.shell) { [weak self] line in
+            await self?.handleWatchLine(line, s)
+        }
+    }
+
+    private func handleWatchLine(_ line: String, _ s: WidgetBackgroundServices) async {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let event = obj["event"] as? String,
+              let callId = obj["callId"] as? String
+        else { return }
+        switch event {
+        case "call-open":
+            let app = obj["app"] as? String ?? "Call"
+            let bundleId = obj["bundleId"] as? String ?? ""
+            await onCallOpen(callId: callId, app: app, bundleId: bundleId, s)
+        case "call-close":
+            await onCallClose(callId: callId, s)
+        default:
+            break
+        }
+    }
+
+    // MARK: (b) Prompt — once per call session, event-driven
+
+    /// A call-open fires the prompt exactly once (dedup by callId). The
+    /// Calendar owns only the pre-session prompt. After a successful handoff,
+    /// Recording owns mic-close behavior and meeting completion.
+    private func onCallOpen(callId: String, app: String, bundleId: String, _ s: WidgetBackgroundServices) async {
+        guard !handledCalls.contains(callId) else { return }
+        handledCalls.insert(callId)
+
+        let detectedAt = Date()
+        let resolved = await resolveAssistedMeeting(s)
+        let sessionName = resolved?.sessionName
+            ?? "\(app) — \(Self.friendlyStamp(detectedAt))"
+        let subtitle = Self.subtitle(for: resolved?.event, app: app)
+
+        let meeting = DetectedMeeting(
+            sessionName: sessionName,
+            subtitle: subtitle,
+            eventId: resolved?.event.id,
+            existingSessionId: resolved?.sessionId,
+            scheduledStart: resolved?.event.startsAt,
+            scheduledEnd: resolved?.event.endsAt,
+            bundleId: bundleId,
+            errorMessage: nil,
+            countdownStart: detectedAt,
+            onRecord: { [weak self] in self?.startRecording(callId: callId, app: app, bundleId: bundleId, s) },
+            onSkip: { [weak self] in self?.skip(callId: callId, s) }
+        )
+        CalendarDetectionState.shared.phase = .detected(meeting)
+        await postDetected(subtitle: subtitle, s)
+        Meet42Trace.log("detect", "prompt-shown", ["callId": callId, "app": app])
+
+        countdownTask?.cancel()
+        countdownTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            Meet42Trace.log("detect", "auto-start-fired", ["callId": callId])
+            self?.startRecording(callId: callId, app: app, bundleId: bundleId, s)
+        }
+    }
+
+    /// What `notification_post` answers: the notification's id (null when the person switched the type off).
+    private struct PostedNotification: Decodable { let id: String? }
+
+    /// Shows the Detected prompt as a `meet42.meeting-detected` notification: the app queues it behind any other pill,
+    /// plays the sound and draws this widget's own pill. The id is kept to take it down.
+    private func postDetected(subtitle: String, _ s: WidgetBackgroundServices) async {
+        let result = try? await s.tools.call(
+            server: "work42-session", tool: "notification_post",
+            arguments: [
+                "type": .string("meet42.meeting-detected"), "title": .string("Meeting detected"),
+                "message": .string(subtitle), "widget": .string("calendar"),
+            ], session: s.sessionId)
+        guard let result, let data = try? JSONEncoder().encode(result),
+              let posted = try? JSONDecoder().decode(PostedNotification.self, from: data)
+        else { return }
+        detectedNotificationId = posted.id
+    }
+
+    /// Takes the Detected notification down for good. Without an id (the post failed) the pill is dismissed directly.
+    private func dismissDetected(_ s: WidgetBackgroundServices) async {
+        guard let id = detectedNotificationId else {
+            try? await s.pill.dismiss(widgetId: "calendar")
+            return
+        }
+        detectedNotificationId = nil
+        _ = try? await s.tools.call(
+            server: "work42-session", tool: "notification_dismiss", arguments: ["id": .string(id)], session: nil)
+    }
+
+    /// A call-close cancels an undecided Detected prompt, if one is showing.
+    /// Once Recording owns the active meeting pill, close events here are
+    /// intentionally ignored.
+    private func onCallClose(callId: String, _ s: WidgetBackgroundServices) async {
+        guard case .detected = CalendarDetectionState.shared.phase else { return }
+        countdownTask?.cancel(); countdownTask = nil
+        CalendarDetectionState.shared.phase = .none
+        await dismissDetected(s)
+    }
+
+    /// Shell `meet42 now --json`; nil when there is no current/imminent meeting.
+    private func resolveNow(_ s: WidgetBackgroundServices) async -> DetectedEventPayload? {
+        guard let r = try? await s.shell.run(command: "meet42 now --json"),
+              r.exitCode == 0 else { return nil }
+        let trimmed = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != "null", let data = trimmed.data(using: .utf8) else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return try? dec.decode(DetectedEventPayload.self, from: data)
+    }
+
+    /// A nearby event is eligible only when assistance is active and its
+    /// previously-created session still resolves. Rejected candidates
+    /// contribute no event identity or schedule data to the ad-hoc path.
+    private func resolveAssistedMeeting(
+        _ s: WidgetBackgroundServices
+    ) async -> ResolvedAssistedMeeting? {
+        guard let event = await resolveNow(s),
+              let modes = await fetchModes(s),
+              (modes.events[event.id] ?? modes.calendars[event.calendarId] ?? .viewOnly) == .assisted,
+              let sessionId = event.sessionId, !sessionId.isEmpty,
+              let shown = try? await s.tools.call(
+                  server: "work42-session", tool: "session_show", arguments: [:], session: sessionId),
+              let data = try? JSONEncoder().encode(shown),
+              let identity = try? JSONDecoder().decode(SessionIdentityPayload.self, from: data),
+              identity.id == sessionId,
+              !identity.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        return ResolvedAssistedMeeting(
+            event: event,
+            sessionId: sessionId,
+            sessionName: identity.name
+        )
+    }
+
+    // MARK: (c) Start sequence — RECORD FIRST, session comes after
+
+    /// Start an app-owned recording, show Calendar's setup loader, seed or mint
+    /// the event session in the background, then hand the pill to Recording.
+    private func startRecording(callId: String, app: String, bundleId: String, _ s: WidgetBackgroundServices) {
+        countdownTask?.cancel(); countdownTask = nil
+        guard case .detected(let meeting) = CalendarDetectionState.shared.phase else { return }
+        Task { [weak self] in
+            guard let self else { return }
+
+            // Start first so capture is live before the slower session work. The recording belongs to this agent's
+            // scope: it ends when Work42 quits or this agent's session goes away, and not before.
+            let recording: (recordingId: String, dir: String)
+            switch await MeetingRecorder.shared.start(
+                services: RecorderServices(background: s), app: app, bundleId: bundleId
+            ) {
+            case .started(let recordingId, let dir):
+                recording = (recordingId, dir)
+            case .refused(let owner):
+                Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "record-refused", "owner": owner])
+                self.showFailure(meeting, message: "Recording is already in use")
+                return
+            case .failed(let reason, let message):
+                Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": reason])
+                self.showFailure(meeting, message: message.isEmpty ? "Couldn't start recording" : message)
+                return
+            }
+            Meet42Trace.log("detect", "record-started", ["callId": callId, "recordingId": recording.recordingId])
+            CalendarDetectionState.shared.phase = .settingUp(meeting)
+
+            let startedAt = ISO8601DateFormatter().string(from: Date())
+            let metadata = Self.meetingMetadata(
+                meeting: meeting, app: app, bundleId: bundleId,
+                recordingDir: recording.dir, startedAt: startedAt
+            )
+
+            let sessionId: String
+            if let existing = meeting.existingSessionId {
+                guard await Self.seedExistingSession(
+                    existing, metadata: metadata, tools: s.tools
+                ) else {
+                    await MeetingRecorder.shared.stop(dir: recording.dir)
+                    self.showFailure(meeting, message: "Couldn't prepare the session")
+                    return
+                }
+                sessionId = existing
+            } else {
+                guard let started = await Self.mintEventSession(
+                    name: meeting.sessionName, eventId: meeting.eventId, storage: metadata, tools: s.tools
+                ) else {
+                    Meet42Trace.log("detect", "start-aborted", ["callId": callId, "reason": "mint-failed"])
+                    await MeetingRecorder.shared.stop(dir: recording.dir)
+                    self.showFailure(meeting, message: "Couldn't create the session")
+                    return
+                }
+                sessionId = started.sessionId
+            }
+            Meet42Trace.log("detect", "session-resolved", ["callId": callId, "sessionId": sessionId])
+
+            // Present swaps the currently mounted Calendar pill for the session-owned Recording pill without selecting that
+            // session. The recording and its session exist by now and must not depend on the pill: a host that cannot draw an
+            // extension's pill refuses the call, and the meeting is recorded all the same (the trace says why there is no pill).
+            do {
+                try await s.pill.present(widgetId: "recording", sessionId: sessionId)
+                Meet42Trace.log("detect", "pill-presented", ["callId": callId, "sessionId": sessionId])
+            } catch {
+                Meet42Trace.pillFailed("present", sessionId: sessionId, error)
+            }
+            CalendarDetectionState.shared.phase = .none
+            await self.dismissDetected(s)
+        }
+    }
+
+    /// "Chrome — Oct 2, 2:14 PM" — the name fed to the `session_start`
+    /// tool for an ad-hoc mint. Must be unique per call (not just per app)
+    /// since SessionMint derives the session id deterministically from the
+    /// name; a constant name would keep resolving to the same old session.
+    private static func friendlyStamp(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, h:mm a"
+        return f.string(from: date)
+    }
+
+    /// Mint a fresh event session without selecting it, with the `session_start` tool.
+    static func mintEventSession(
+        name: String, eventId: String?, storage: [(key: String, value: String)],
+        tools: any WidgetToolService
+    ) async -> SessionStartResult? {
+        var seeds: [String: WidgetJSONValue] = [:]
+        for item in storage { seeds[item.key] = .string(item.value) }
+        var arguments: [String: WidgetJSONValue] = [
+            "type": .string("event"), "name": .string(name),
+            "storage": .object(seeds), "background": .bool(true),
+        ]
+        if let eventId { arguments["args"] = .object(["event_id": .string(eventId)]) }
+        guard let started = try? await tools.call(
+            server: "work42-session", tool: "session_start", arguments: arguments, session: nil),
+              let data = try? JSONEncoder().encode(started)
+        else { return nil }
+        return try? JSONDecoder().decode(SessionStartResult.self, from: data)
+    }
+
+    private static func meetingMetadata(
+        meeting: DetectedMeeting, app: String, bundleId: String,
+        recordingDir: String, startedAt: String
+    ) -> [(key: String, value: String)] {
+        var values = [
+            ("meeting/recording_dir", recordingDir),
+            ("meeting/started_at", startedAt),
+            ("meeting/title", meeting.sessionName),
+            ("meeting/source_app", app),
+            ("meeting/source_bundle_id", bundleId),
+        ]
+        if let start = meeting.scheduledStart, let end = meeting.scheduledEnd {
+            let formatter = ISO8601DateFormatter()
+            values += [
+                ("meeting/scheduled_start", formatter.string(from: start)),
+                ("meeting/scheduled_end", formatter.string(from: end)),
+            ]
+        }
+        return values
+    }
+
+    private static func seedExistingSession(
+        _ sessionId: String,
+        metadata: [(key: String, value: String)],
+        tools: any WidgetToolService
+    ) async -> Bool {
+        for item in metadata {
+            do {
+                _ = try await tools.call(
+                    server: "work42-session", tool: "storage_set",
+                    arguments: ["key": .string(item.key), "value": .string(item.value)], session: sessionId)
+            } catch {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func showFailure(_ meeting: DetectedMeeting, message: String) {
+        countdownTask?.cancel(); countdownTask = nil
+        CalendarDetectionState.shared.phase = .detected(DetectedMeeting(
+            sessionName: meeting.sessionName,
+            subtitle: meeting.subtitle,
+            eventId: meeting.eventId,
+            existingSessionId: meeting.existingSessionId,
+            scheduledStart: meeting.scheduledStart,
+            scheduledEnd: meeting.scheduledEnd,
+            bundleId: meeting.bundleId,
+            errorMessage: message,
+            countdownStart: Date(),
+            onRecord: meeting.onRecord,
+            onSkip: meeting.onSkip
+        ))
+    }
+
+    /// No — permanently dismiss for this call session; a genuinely new call
+    /// (new callId) prompts again.
+    private func skip(callId: String, _ s: WidgetBackgroundServices) {
+        Meet42Trace.log("detect", "no", ["callId": callId])
+        countdownTask?.cancel(); countdownTask = nil
+        Task { [weak self] in await self?.clearAndDismiss(s) }
+    }
+
+    private func clearAndDismiss(_ s: WidgetBackgroundServices) async {
+        CalendarDetectionState.shared.phase = .none
+        await dismissDetected(s)
+    }
+
+    // MARK: (b) Reconciler — assisted events → work42 scheduler
+
+    /// Sync assisted calendar events into work42's generic scheduler: schedule a
+    /// session start at T-15min under a stable `mtg:<id>` key (idempotent add),
+    /// and cancel keys for events that are no longer assisted / gone.
+    private func reconcileCycle(_ s: WidgetBackgroundServices) async {
+        // Effective mode per event: event override → calendar default → view_only.
+        guard let modes = await fetchModes(s) else { return }
+        let events = await fetchEvents(s)
+        // The workspace to start the sessions in: the widget's own session's, read once per cycle. Without it nothing
+        // can be scheduled, so skip the cycle (the next one tries again).
+        guard let workspace = await ownWorkspace(s) else {
+            Meet42Trace.log("reconcile", "no-workspace", [:])
+            return
+        }
+
+        var desired: Set<String> = []
+        for e in events {
+            let mode = modes.events[e.id] ?? modes.calendars[e.calendarId] ?? .viewOnly
+            guard mode == .assisted else { continue }
+            // An event that already has a session (created on demand, or automatically earlier) gets no second one.
+            if e.sessionId != nil { continue }
+            let key = "mtg:\(e.id)"
+            desired.insert(key)
+            let at = e.startsAt.addingTimeInterval(-15 * 60)
+            let iso = ISO8601DateFormatter().string(from: at)
+            // add is idempotent on --key — re-adding replaces the entry.
+            let typeId = modes.effectiveType(eventId: e.id, calendarId: e.calendarId)
+            _ = try? await s.tools.call(
+                server: "work42-session", tool: "schedule_add",
+                arguments: [
+                    "type": .string(typeId), "workspace": .string(workspace), "name": .string(e.title),
+                    "at": .string(iso), "args": .object(["event_id": .string(e.id)]), "key": .string(key),
+                ], session: nil)
+        }
+
+        // Cancel keys we previously added that are no longer desired.
+        for key in scheduledKeys.subtracting(desired) {
+            _ = try? await s.tools.call(
+                server: "work42-session", tool: "schedule_cancel", arguments: ["key": .string(key)], session: nil)
+        }
+        scheduledKeys = desired
+    }
+
+    /// The workspace of the widget's own session (`session_show` → `workspace_id`), or nil when it cannot be read.
+    private func ownWorkspace(_ s: WidgetBackgroundServices) async -> String? {
+        guard let shown = try? await s.tools.call(
+                server: "work42-session", tool: "session_show", arguments: [:], session: nil),
+              let data = try? JSONEncoder().encode(shown),
+              let payload = try? JSONDecoder().decode(SessionWorkspacePayload.self, from: data),
+              !payload.workspaceId.isEmpty
+        else { return nil }
+        return payload.workspaceId
+    }
+
+    private func fetchModes(_ s: WidgetBackgroundServices) async -> ModesPayload? {
+        guard let r = try? await s.shell.run(command: "meet42 modes get --json"),
+              r.exitCode == 0, let data = r.stdout.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ModesPayload.self, from: data)
+    }
+
+    private func fetchEvents(_ s: WidgetBackgroundServices) async -> [CalEvent] {
+        let iso = ISO8601DateFormatter()
+        let from = Date()
+        let to = Calendar.current.date(byAdding: .day, value: 30, to: from) ?? from
+        let cmd = "meet42 list --from \(calShellQuote(iso.string(from: from)))"
+            + " --to \(calShellQuote(iso.string(from: to))) --json"
+        guard let r = try? await s.shell.run(command: cmd), r.exitCode == 0,
+              let data = r.stdout.data(using: .utf8) else { return [] }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return (try? dec.decode([CalEvent].self, from: data)) ?? []
+    }
+
+    // MARK: Subtitle
+
+    /// Source and timing context. Ad-hoc calls state that they will create a
+    /// new session rather than borrow identity from a nearby calendar event.
+    private static func subtitle(for event: DetectedEventPayload?, app: String) -> String {
+        guard let event else { return "\(app) · New ad hoc session" }
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        let range = "\(f.string(from: event.startsAt)) – \(f.string(from: event.endsAt))"
+        return "\(app) · Scheduled \(range)"
+    }
+}
+
+/// Decode target for the `session_start` tool's result.
+struct SessionStartResult: Decodable {
+    let sessionId: String
+    let ownerDir: String?
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case ownerDir = "owner_dir"
+    }
+}
+
+// MARK: - CalendarWidget
+
+@Observable
+@MainActor
+final class CalendarWidget: Work42Widget, Work42WidgetPill, Work42WidgetBackground, Work42WidgetCustomHeader,
+    Work42WidgetActionPopovers {
+    let id = "calendar"
+    let title = "Meet42 Calendar"
+    let icon = "calendar"
+    /// The period being shown ("October 2026 · Oct 25 — Oct 31 · 67 events") lives in the tile header, not as
+    /// a block above the grid; the body keeps the default 16 pt inset.
+    var contentPadding: Double { 16 }
+
+    func makeHeaderView() -> AnyView {
+        AnyView(CalendarHeaderView(widget: self))
+    }
+
+    /// The ⚙ intent's per-calendar AI assistance panel, shown by Work42 in a popover anchored to the ⚙ button.
+    func actionAreaPopover(for intentName: String, dismiss: @escaping @MainActor () -> Void) -> AnyView? {
+        guard intentName == "settings", let store else { return nil }
+        return AnyView(CalendarSettingsPopoverHost(store: store))
+    }
+    var linkIntents: [WidgetLinkIntentSpec] { [] }
+    var minSize: WidgetMinSize { WidgetMinSize(width: 420, height: 360) }
+
+    // MARK: - Shared store (drives both the view and the action-area intents)
+
+    /// Created in `activate(services:)`, torn down in `deactivate()`. Nil until
+    /// activate fires; `CalendarRootView` shows a ProgressView while nil.
+    private(set) var store: CLICalendarStore?
+
+    @ObservationIgnored private var activatedServices: SessionServices?
+
+    // MARK: - Work42Widget lifecycle
+
+    func activate(services: SessionServices) {
+        activatedServices = services
+        let s = CLICalendarStore(services: services)
+        store = s
+        s.start()
+    }
+
+    func deactivate() {
+        store?.stop()
+        store = nil
+        activatedServices = nil
+    }
+
+    func makeView(services: SessionServices) -> AnyView {
+        AnyView(CalendarRootView(widget: self))
+    }
+
+    // MARK: - Action-area intents (AC8 — controls moved out of the widget body)
+    //
+    // Five intents matching the pre-conversion HomeView.actionAreaIntents calendar
+    // controls: a view-mode menu, previous/today/next navigation, and settings.
+    // All carry `placement: [.actionArea]` so they appear in the tab-bar row
+    // beside "Add Widget" while this widget is active — NOT inside the widget body.
+
+    var intents: [WidgetIntentSpec] {
+        [
+            // ── 1. View mode — Day / Week / Agenda ────────────────────────────
+            WidgetIntentSpec(
+                name: "viewMode",
+                title: "View",
+                icon: "calendar",
+                placement: [.actionArea],
+                actionAreaStyle: .menu(
+                    options: { [weak self] in
+                        guard let self, let store = self.store else { return [] }
+                        return CLICalendarStore.ViewMode.allCases.map { mode in
+                            WidgetIntentMenuOption(
+                                id: mode.rawValue,
+                                title: mode.label,
+                                isSelected: store.viewMode == mode
+                            )
+                        }
+                    },
+                    onSelect: { [weak self] rawValue in
+                        guard let self, let store = self.store,
+                              let mode = CLICalendarStore.ViewMode(rawValue: rawValue)
+                        else { return }
+                        store.setViewMode(mode)
+                    }
+                ),
+                perform: {}      // action-area menu — palette invocation is a no-op
+            ),
+
+            // ── 2. Previous ───────────────────────────────────────────────────
+            WidgetIntentSpec(
+                name: "previous",
+                title: "Previous",
+                icon: "chevron.left",
+                placement: [.actionArea],
+                actionAreaStyle: .icon,
+                isEnabled: { [weak self] in self?.store?.viewMode != .agenda },
+                perform: { [weak self] in self?.store?.goToPrevious() }
+            ),
+
+            // ── 3. Today ──────────────────────────────────────────────────────
+            // Uses `.pill` style — the WidgetIntentActionAreaStyle docs explicitly
+            // cite "Today" as the example of a text-only pill control.
+            WidgetIntentSpec(
+                name: "today",
+                title: "Today",
+                icon: "clock",
+                placement: [.actionArea],
+                actionAreaStyle: .pill,
+                perform: { [weak self] in self?.store?.goToToday() }
+            ),
+
+            // ── 4. Next ───────────────────────────────────────────────────────
+            WidgetIntentSpec(
+                name: "next",
+                title: "Next",
+                icon: "chevron.right",
+                placement: [.actionArea],
+                actionAreaStyle: .icon,
+                isEnabled: { [weak self] in self?.store?.viewMode != .agenda },
+                perform: { [weak self] in self?.store?.goToNext() }
+            ),
+
+            // ── 5. Settings ⚙ ────────────────────────────────────────────────
+            // Tapping the ⚙ button opens the per-calendar AI assistance panel in a popover anchored to the
+            // button itself (`actionAreaPopover(for:)`); `perform` only runs where no popover can be shown
+            // (a hosting Work42 that predates `Work42WidgetActionPopovers`), and does nothing there.
+            WidgetIntentSpec(
+                name: "settings",
+                title: "Calendar Settings",
+                icon: "gearshape",
+                placement: [.actionArea],
+                actionAreaStyle: .icon,
+                perform: {}
+            ),
+        ]
+    }
+
+    // MARK: Work42WidgetBackground — the mic-wake detector + scheduler reconciler.
+
+    func makeBackgroundAgent() -> any WidgetBackgroundAgent { CalendarDetectionAgent() }
+
+    // MARK: Work42WidgetPill — DETECTED accessory when the agent flags a meeting,
+    // else the compact "next N events" agenda.
+
+    func makePillView(services: SessionServices) -> AnyView? {
+        AnyView(CalendarPillRouter(services: services))
+    }
+
+    var pillMetadata: WidgetPillMetadata {
+        WidgetPillMetadata(
+            // Matches DetectedPillView's actual rendered size (412 wide,
+            // ~108 tall) — a mismatched preferredSize leaves dead space
+            // until the live onPreferenceChange resize catches up.
+            // SettingUpPillView reports its own (narrower) size, and the
+            // host panel live-resizes between the two automatically.
+            preferredSize: WidgetMinSize(width: 412, height: 108),
+            title: title,
+            icon: icon
+        )
+    }
+}
+
+// MARK: - CalendarRootView
+
+private struct CalendarRootView: View {
+    /// The owning CalendarWidget provides the shared CLICalendarStore (populated in activate(services:)).
+    let widget: CalendarWidget
+
+    var body: some View {
+        Group {
+            if let store = widget.store {
+                VStack(alignment: .leading, spacing: 0) {
+                    content(store)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .environment(\.calEventLoader, { id in await store.loadMeetEvent(id) })
+                .environment(\.calSessionCreate, { id, title in try await store.createEventSession(eventId: id, title: title) })
+                .environment(\.calSessionCancel, { id in await store.cancelScheduledSession(for: id) })
+                .environment(\.calTypePicker, CalTypePicker(
+                    choices: store.sessionTypes,
+                    selection: { store.eventTypes[$0] },
+                    defaultName: { calendarId in
+                        let typeId = store.calendarTypes[calendarId] ?? "event"
+                        return store.sessionTypes.first { $0.id == typeId }?.name ?? (typeId == "event" ? "Event" : typeId)
+                    },
+                    set: { id, typeId in store.setEventType(id, typeId) }))
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    // MARK: Content router
+
+    @ViewBuilder
+    private func content(_ store: CLICalendarStore) -> some View {
+        switch store.viewMode {
+        case .day:
+            DayTimelineView(
+                referenceDate: store.referenceDate,
+                events: store.events,
+                modeFor: { store.mode(for: $0) },
+                onEnableAssistance: { store.setEventMode($0.id, .assisted) }
+            )
+        case .week:
+            WeekTimeline(
+                referenceDate: store.referenceDate,
+                events: store.events,
+                modeFor: { store.mode(for: $0) },
+                onEnableAssistance: { store.setEventMode($0.id, .assisted) }
+            )
+        case .agenda:
+            if store.events.isEmpty {
+                emptyState
+            } else {
+                AgendaList(
+                    groups: store.eventsByDay(),
+                    modeFor: { store.mode(for: $0) },
+                    onEnableAssistance: { store.setEventMode($0.id, .assisted) }
+                )
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: DT.s16) {
+            Image(systemName: "calendar")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(DT.systemAccent)
+            Text("Nothing scheduled in this range")
+                .font(.system(size: DT.f15, weight: .semibold))
+            Text("Events appear here once meet42 has synced your calendar.")
+                .font(.system(size: DT.f12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(DT.s40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Labels
+
+    fileprivate static func periodLabel(_ store: CLICalendarStore) -> String {
+        let f = DateFormatter()
+        switch store.viewMode {
+        case .day:    f.dateFormat = "MMMM d, yyyy"; return f.string(from: store.referenceDate)
+        case .week:   f.dateFormat = "MMMM yyyy";    return f.string(from: store.referenceDate)
+        case .agenda: return "Agenda"
+        }
+    }
+
+    fileprivate static func periodSubLabel(_ store: CLICalendarStore) -> String {
+        switch store.viewMode {
+        case .day:
+            let f = DateFormatter(); f.dateFormat = "EEEE"; return f.string(from: store.referenceDate)
+        case .week:
+            let cal = Calendar.current
+            let start = CLICalendarStore.startOfWeek(store.referenceDate)
+            let end = cal.date(byAdding: .day, value: 6, to: start) ?? start
+            let f = DateFormatter(); f.dateFormat = "MMM d"
+            return "\(f.string(from: start)) — \(f.string(from: end))"
+        case .agenda:
+            return ""
+        }
+    }
+
+    fileprivate static func subtitle(_ store: CLICalendarStore) -> String {
+        let count = store.events.count
+        return count == 1 ? "1 event" : "\(count) events"
+    }
+}
+
+// MARK: - CalendarSettingsPopoverHost
+
+/// The ⚙ popover's content, reading the store live so a toggle shows its new state at once.
+private struct CalendarSettingsPopoverHost: View {
+    let store: CLICalendarStore
+
+    var body: some View {
+        CalendarSettingsPopover(
+            choices: store.calendarChoices,
+            typeChoices: store.sessionTypes,
+            setMode: { id, mode in store.setCalendarMode(id, mode) },
+            setType: { id, typeId in store.setCalendarType(id, typeId) }
+        )
+    }
+}
+
+// MARK: - CalendarHeaderView
+
+/// The tile header: the period in the title's place, its range and event count beside it. Reads the widget's
+/// observable store, so it follows the date stepper and the view menu live.
+private struct CalendarHeaderView: View {
+    let widget: CalendarWidget
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: DT.s8) {
+            if let store = widget.store {
+                Text(CalendarRootView.periodLabel(store))
+                    .font(.system(size: DT.f13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(detail(store))
+                    .font(.system(size: DT.f11))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(widget.title)
+                    .font(.system(size: DT.f13, weight: .semibold))
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+    }
+
+    private func detail(_ store: CLICalendarStore) -> String {
+        [CalendarRootView.periodSubLabel(store), CalendarRootView.subtitle(store)]
+            .filter { !$0.isEmpty }
+            .joined(separator: " \u{00B7} ")
+    }
+}
+
+// MARK: - CalendarPillView (compact "next N events" agenda)
+
+private struct CalendarPillView: View {
+    let services: SessionServices
+
+    @State private var store: CLICalendarStore?
+
+    var body: some View {
+        Group {
+            if let store {
+                let upcoming = Array(
+                    store.events
+                        .filter { $0.endsAt >= Date() }
+                        .sorted { $0.startsAt < $1.startsAt }
+                        .prefix(5)
+                )
+                VStack(alignment: .leading, spacing: DT.s8) {
+                    Text("UP NEXT")
+                        .font(.system(size: DT.f9, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(DT.textTertiary)
+                    if upcoming.isEmpty {
+                        Text("Nothing upcoming")
+                            .font(.system(size: DT.f11))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(upcoming) { e in
+                            HStack(spacing: DT.s8) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(EventVisual.tint(for: store.mode(for: e)))
+                                    .frame(width: 3, height: 26)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(e.title.isEmpty ? "(Untitled)" : e.title)
+                                        .font(.system(size: DT.f12, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(e.allDay ? "all-day" : whenLabel(e.startsAt))
+                                        .font(.system(size: DT.f10))
+                                        .foregroundStyle(DT.textTertiary)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                }
+                .padding(DT.s12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ProgressView().padding(DT.s12)
+            }
+        }
+        .onAppear {
+            if store == nil {
+                let s = CLICalendarStore(services: services)
+                s.viewMode = .agenda
+                store = s
+                s.start()
+            }
+        }
+        .onDisappear { store?.stop() }
+    }
+
+    private func whenLabel(_ d: Date) -> String {
+        let cal = Calendar.current
+        let f = DateFormatter()
+        f.dateFormat = cal.isDateInToday(d) ? "'Today' h:mm a" : "EEE MMM d · h:mm a"
+        return f.string(from: d)
+    }
+}

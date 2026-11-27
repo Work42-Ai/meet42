@@ -2,9 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   meet42-Info.plist — the Info.plist of meet42.app (scripts/build-meet42.sh), and also embedded into the
-  binary's __TEXT,__info_plist section so a bare `swift build` binary carries the same usage strings.
-  meet42 ships as a small signed app bundle (no Dock icon, no window) because macOS only shows its
-  permission prompts reliably for an app bundle, not for a bare command-line binary.
+  binary's __TEXT,__info_plist section so a bare `swift build` binary carries the same identity.
+  meet42 ships as a small signed app bundle (no Dock icon, no window) so Work42 can keep it at ~/.work42/meet42.app and link
+  `meet42` from ~/.work42/bin. Since 2.0.0 it holds no privacy permission: Work42 records, transcribes and reads the
+  calendars for the meet42 plugin, so there are no usage-description strings here.
 -->
 <plist version="1.0">
 <dict>
@@ -22,13 +23,5 @@
     <string>15.0</string>
     <key>CFBundleExecutable</key>
     <string>meet42</string>
-    <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>meet42 reads your calendar to list meetings and prepare sessions for them.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>meet42 records meeting audio locally to produce a private transcript.</string>
-    <key>NSAudioCaptureUsageDescription</key>
-    <string>meet42 listens to your Mac's audio output during a meeting so it can transcribe the other participants. It never records your screen.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>meet42 transcribes meeting audio on-device using the system speech recognizer.</string>
 </dict>
 </plist>
